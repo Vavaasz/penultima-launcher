@@ -1,0 +1,69 @@
+[package]
+name = "game-launcher"
+version = "0.1.0"
+edition = "2021"
+
+# Configuração para desabilitar o console
+[package.metadata]
+windows_subsystem = "windows"
+
+# Configuração para recursos do Windows
+[package.metadata.winres]
+OriginalFilename = "game-launcher.exe"
+FileDescription = "Game Launcher"
+ProductName = "Game Launcher"
+ProductVersion = "1.0.0"
+LegalCopyright = "Copyright 2024"
+
+[profile.dev]
+opt-level = 0 # Nenhuma otimização para tempos de compilação mais rápidos
+debug = true # Máximo de informações de depuração
+overflow-checks = true # Verificações de estouro de inteiros
+debug-assertions = true # Ativar asserções de depuração
+incremental = true # Compilação incremental para tempos de compilação mais rápidos
+panic = "unwind" # Permite depuração mais detalhada
+
+[profile.release]
+opt-level = 3 # Otimização agressiva para tamanho reduzido
+debug = false # Sem informações de depuração
+overflow-checks = true # Verificações de estouro de inteiros
+lto = "fat" # Otimização de tempo de link
+codegen-units = 1 # Unidades de geração de código única para otimização máxima
+panic = "abort" # Abortar em caso de pânico para reduzir o tamanho do binário
+incremental = false # Sem compilação incremental para otimização máxima
+
+[dependencies]
+tokio = { version = "1.35", features = ["full"] }
+eframe = { version = "0.31.0", features = ["default_fonts", "persistence"] }
+egui = "0.31.0"
+reqwest = { version = "0.12.12", features = ["json", "stream"] }
+directories = "6.0.0"
+anyhow = "1.0"
+winapi = { version = "0.3", features = ["winuser", "windef", "processthreadsapi", "memoryapi", "consoleapi"] }
+windows = { version = "0.52", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp"] }
+zip = "2.2.2"
+futures-util = "0.3"
+semver = "1.0"
+log = "0.4"
+env_logger = "0.11"
+glob = "0.3"
+tray-icon = "0.19.2"
+image = "0.25.5"
+aes = "0.8"
+cbc = "0.1"
+rand = "0.8"
+tokio-util = { version = "0.7", features = ["codec", "net"] }
+bytes = "1.5"
+flate2 = "1.0"
+socket2 = "0.5"
+native-tls = "0.2"
+tokio-native-tls = "0.3"
+tokio-rustls = "0.24"
+rustls = "0.21"
+webpki-roots = "0.25"
+fs2 = "0.4.3"
+single-instance = "0.3.3"
+clap = { version = "4.5", features = ["derive"] }
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
