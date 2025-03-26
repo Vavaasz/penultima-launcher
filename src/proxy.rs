@@ -1,13 +1,13 @@
-use std::time::{Duration};
-use tokio::net::TcpStream;
-use tokio::time::{timeout, sleep};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use anyhow::{Result};
-use log::{info, warn, error};
-use tokio_native_tls::TlsConnector as TokioTlsConnector;
+use anyhow::Result;
+use log::{error, info, warn};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::net::TcpStream;
+use tokio::time::{sleep, timeout};
+use tokio_native_tls::TlsConnector as TokioTlsConnector;
 
 // Constantes de configuração
 const TIMEOUT_DURATION: Duration = Duration::from_secs(5); // Reduzido de 30 para 5 segundos
@@ -16,12 +16,12 @@ const READ_TIMEOUT: Duration = Duration::from_secs(5); // Novo timeout específi
 
 /// Configuração do proxy com portas e hosts de destino.
 pub struct ProxyConfig {
-    pub login_port: u16,     // Porta do servidor de login (ex: 7171)
-    pub game_port: u16,      // Porta do servidor de jogo (ex: 7172)
-    pub http_port: u16,      // Porta HTTP (ex: 80)
-    pub https_port: u16,     // Porta HTTPS (ex: 443)
-    pub game_host: String,   // IP ou hostname do servidor de jogo
-    pub web_host: String,    // Hostname do servidor web
+    pub login_port: u16,   // Porta do servidor de login (ex: 7171)
+    pub game_port: u16,    // Porta do servidor de jogo (ex: 7172)
+    pub http_port: u16,    // Porta HTTP (ex: 80)
+    pub https_port: u16,   // Porta HTTPS (ex: 443)
+    pub game_host: String, // IP ou hostname do servidor de jogo
+    pub web_host: String,  // Hostname do servidor web
 }
 
 impl Default for ProxyConfig {
@@ -31,7 +31,7 @@ impl Default for ProxyConfig {
             game_port: 7172,
             http_port: 80,
             https_port: 443,
-            game_host: "201.54.8.237".to_string(),      // Exemplo de IP do servidor de jogo
+            game_host: "201.54.8.237".to_string(), // Exemplo de IP do servidor de jogo
             web_host: "login.arcadiaot.com.br".to_string(), // Exemplo de host web
         }
     }
@@ -55,7 +55,7 @@ impl ConnectionStats {
     }
 
     /// Registra as estatísticas da conexão no log.
-    fn log_stats(&self, client_addr: std::net::SocketAddr, target_host: &str, target_port: u16) {
+    fn log_stats(&self, client_addr: SocketAddr, target_host: &str, target_port: u16) {
         let duration = self.start_time.elapsed();
         info!(
             "[PROXY] Estatísticas da conexão - Cliente: {}, Servidor: {}:{} - Duração: {:.2}s, Bytes Recebidos: {}, Bytes Enviados: {}, Taxa: {:.2} KB/s",
@@ -74,8 +74,8 @@ impl ConnectionStats {
 fn get_buffer_size(port: u16) -> usize {
     match port {
         7171 | 7172 => 65535, // Buffer pequeno para jogos (baixa latência)
-        80 | 443 => 4096,    // Buffer maior para HTTP/HTTPS (maior throughput)
-        _ => 4096,           // Tamanho padrão para outras portas
+        80 | 443 => 4096,     // Buffer maior para HTTP/HTTPS (maior throughput)
+        _ => 4096,            // Tamanho padrão para outras portas
     }
 }
 
@@ -90,7 +90,7 @@ async fn handle_connection(
 
     // Obter o endereço do cliente
     let client_addr = client_stream.peer_addr()?;
-    
+
     // Estrutura para rastrear estatísticas da conexão
     let mut stats = ConnectionStats::new();
 
@@ -98,7 +98,14 @@ async fn handle_connection(
     if target_port == 80 {
         handle_https_connection(client_stream, &target_host, client_addr, &mut stats).await?;
     } else {
-        handle_tcp_connection(client_stream, &target_host, target_port, client_addr, &mut stats).await?;
+        handle_tcp_connection(
+            client_stream,
+            &target_host,
+            target_port,
+            client_addr,
+            &mut stats,
+        )
+        .await?;
     }
 
     // Registrar as estatísticas da conexão
@@ -127,8 +134,9 @@ async fn handle_https_connection(
     // Conectar-se ao servidor com timeout
     let server_stream = timeout(
         TIMEOUT_DURATION,
-        TcpStream::connect(format!("{}:8443", target_host))
-    ).await??;
+        TcpStream::connect(format!("{}:8443", target_host)),
+    )
+    .await??;
     let server_stream = configure_tcp_stream(server_stream).await?;
 
     // Usar um TlsConnector com configuração segura
@@ -136,7 +144,7 @@ async fn handle_https_connection(
     builder
         .min_protocol_version(Some(native_tls::Protocol::Tlsv12))
         .max_protocol_version(None); // Permite TLS 1.3 se disponível
-    
+
     let native_connector = builder.build()?;
     let connector = TokioTlsConnector::from(native_connector);
 
@@ -144,7 +152,8 @@ async fn handle_https_connection(
     let mut server_stream = timeout(
         TIMEOUT_DURATION,
         connector.connect(target_host, server_stream),
-    ).await??;
+    )
+    .await??;
 
     info!("[PROXY] Conexão HTTPS estabelecida para {}", client_addr);
 
@@ -171,8 +180,13 @@ async fn handle_https_connection(
     // 2. Processar e enviar a requisição para o servidor
     if let Ok(request) = String::from_utf8(buffer[..n].to_vec()) {
         let modified_request = modify_http_request(&request, target_host);
-        
-        if let Err(_e) = timeout(TIMEOUT_DURATION, server_stream.write_all(modified_request.as_bytes())).await {
+
+        if let Err(_e) = timeout(
+            TIMEOUT_DURATION,
+            server_stream.write_all(modified_request.as_bytes()),
+        )
+        .await
+        {
             // debug!("[PROXY] Erro ao enviar para o servidor {}: {}", client_addr, e);
             return Ok(());
         }
@@ -317,7 +331,8 @@ fn modify_http_request(request: &str, target_host: &str) -> String {
             }
         })
         .collect::<Vec<_>>()
-        .join("\r\n") + "\r\n\r\n"
+        .join("\r\n")
+        + "\r\n\r\n"
 }
 
 /// Executa o proxy, escutando em todas as portas configuradas.

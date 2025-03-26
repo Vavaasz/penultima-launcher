@@ -40,28 +40,17 @@ reqwest = { version = "0.12.12", features = ["json", "stream"] }
 directories = "6.0.0"
 anyhow = "1.0"
 winapi = { version = "0.3", features = ["winuser", "windef", "processthreadsapi", "memoryapi", "consoleapi"] }
-windows = { version = "0.52", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp"] }
+windows = { version = "0.61.1", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp"] }
 zip = "2.2.2"
 futures-util = "0.3"
 semver = "1.0"
 log = "0.4"
 env_logger = "0.11"
-glob = "0.3"
-tray-icon = "0.19.2"
+glob = "0.3.1"
+tray-icon = "0.20.0"
 image = "0.25.5"
-aes = "0.8"
-cbc = "0.1"
-rand = "0.8"
-tokio-util = { version = "0.7", features = ["codec", "net"] }
-bytes = "1.5"
-flate2 = "1.0"
-socket2 = "0.5"
 native-tls = "0.2"
 tokio-native-tls = "0.3"
-tokio-rustls = "0.24"
-rustls = "0.21"
-webpki-roots = "0.25"
-fs2 = "0.4.3"
 single-instance = "0.3.3"
 clap = { version = "4.5", features = ["derive"] }
 
