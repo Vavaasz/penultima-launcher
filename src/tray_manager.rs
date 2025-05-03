@@ -5,6 +5,8 @@ use eframe::egui::IconData;
 use image;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
+use log::info;
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuId, MenuItemBuilder},
     Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
@@ -27,7 +29,7 @@ impl TrayManager {
 
     // Configurar ícone da bandeja e eventos
     pub fn setup(&mut self, window_state: Arc<Mutex<WindowState>>) -> Result<()> {
-        println!("Criando ícone na bandeja...");
+        info!("Criando ícone na bandeja...");
 
         // Carregar o ícone
         let icon = include_bytes!("../assets/icon.ico");
@@ -78,7 +80,7 @@ impl TrayManager {
 
         self.tray_icon = Some(tray_icon);
 
-        println!("Ícone criado com sucesso!");
+        info!("Ícone criado com sucesso!");
 
         // Configurar eventos do menu
         self.setup_menu_events(window_state.clone());
@@ -105,13 +107,15 @@ impl TrayManager {
             
             while let Ok(event) = menu_channel.recv() {
                 if event.id == restore_id {
-                    println!("Menu Abrir clicado!");
+                    info!("Menu Abrir clicado!");
                     // Usar o método do WindowManager em vez da função independente
                     window_manager.show_window();
                 } else if event.id == quit_id {
-                    println!("Menu Sair clicado!");
+                    info!("Menu Sair clicado!");
                     std::process::exit(0);
                 }
+
+                thread::sleep(Duration::from_secs(1));
             }
         });
     }
@@ -136,11 +140,12 @@ impl TrayManager {
                 } = event
                 {
                     if button == MouseButton::Left && button_state == MouseButtonState::Up {
-                        println!("Ícone clicado! Tornando janela visível...");
+                        info!("Ícone clicado! Tornando janela visível...");
                         // Usar o método do WindowManager em vez da função independente
                         window_manager.show_window();
                     }
                 }
+                thread::sleep(Duration::from_secs(1));
             }
         });
     }

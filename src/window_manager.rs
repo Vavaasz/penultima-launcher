@@ -5,6 +5,7 @@ use image;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use log::info;
 use winapi::um::winuser::{
     FindWindowW, SetForegroundWindow, SetWindowPos, ShowWindow, HWND_NOTOPMOST, HWND_TOPMOST,
     SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_RESTORE, SW_SHOW,
@@ -55,7 +56,7 @@ impl WindowManager {
 
             let hwnd = FindWindowW(null_mut(), title.as_ptr());
             if !hwnd.is_null() {
-                println!("Janela encontrada, restaurando...");
+                info!("Janela encontrada, restaurando...");
 
                 // Traz a janela para frente
                 SetForegroundWindow(hwnd);
@@ -72,7 +73,7 @@ impl WindowManager {
                 // Solicita repintura da UI
                 self.needs_repaint.store(true, Ordering::SeqCst);
             } else {
-                println!("Janela não encontrada!");
+                info!("Janela não encontrada!");
             }
         }
     }
@@ -97,7 +98,7 @@ impl WindowManager {
                 let mut state = self.window_state.lock().unwrap();
                 state.visible = false;
             } else {
-                println!("Janela não encontrada!");
+                info!("Janela não encontrada!");
             }
         }
     }
@@ -106,18 +107,19 @@ impl WindowManager {
     pub fn get_native_options() -> eframe::NativeOptions {
         eframe::NativeOptions {
             persist_window: false,
-            centered: true,
+            centered: true, // Isto já está correto
             viewport: egui::ViewportBuilder::default()
-                .with_inner_size([400.0, 500.0]) // Define o tamanho inicial explicitamente
-                .with_visible(true) // Inicia o launcher visível
-                .with_resizable(false) // Impede o redimensionamento
+                .with_inner_size([800.0, 450.0])
+                .with_visible(true)
+                .with_resizable(false)
                 .with_maximized(false)
-                .with_maximize_button(false) // Desativa botão de maximizar
+                .with_maximize_button(false)
                 .with_title("ArcadiaOT Launcher")
                 .with_decorations(true)
                 .with_transparent(false)
-                .with_active(true) // Ativa a janela ao iniciar
-                .with_position([0.0, 0.0])
+                .with_active(true)
+                // Remova esta linha ou substitua por .with_position(None)
+                // .with_position([0.0, 0.0])
                 .with_icon(Self::load_icon().unwrap_or_else(|| {
                     Arc::new(IconData {
                         rgba: Vec::new(),

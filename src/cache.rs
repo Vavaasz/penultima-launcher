@@ -1,11 +1,13 @@
 use crate::tokio::sync::mpsc;
 use crate::LauncherMessage;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use log::info;
 use std::fs;
 use std::path::PathBuf;
 use tokio;
 use tokio::time::Duration;
+use serde::{Deserialize, Serialize};
+use serde_json;
 
 /// Estrutura para gerenciar as operações de cache do launcher
 pub struct CacheManager {
@@ -15,12 +17,35 @@ pub struct CacheManager {
     game_path: PathBuf,
 }
 
+#[derive(Serialize, Deserialize, Default)]
+pub struct UserSettings {
+    pub disable_auto_start: bool,
+}
+
 impl CacheManager {
     /// Cria uma nova instância do CacheManager
     pub fn new(download_path: PathBuf, game_path: PathBuf) -> Self {
         Self {
             download_path,
             game_path,
+        }
+    }
+
+    pub fn save_user_settings(&self, settings: &UserSettings) -> Result<()> {
+        let settings_path = self.game_path.join("settings.json");
+        let json = serde_json::to_string_pretty(settings)?;
+        fs::write(&settings_path, json)?;
+        Ok(())
+    }
+
+    pub fn load_user_settings(&self) -> Result<UserSettings> {
+        let settings_path = self.game_path.join("settings.json");
+        if settings_path.exists() {
+            let json = fs::read_to_string(&settings_path)?;
+            let settings = serde_json::from_str(&json)?;
+            Ok(settings)
+        } else {
+            Ok(UserSettings::default())
         }
     }
 

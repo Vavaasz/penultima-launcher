@@ -1,37 +1,55 @@
 use anyhow::{Context, Result};
-use directories::ProjectDirs;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use log::{error, info};
+use std::env;
 
 /// Estrutura para gerenciar os diretórios da aplicação
 pub struct AppDirs {
-    pub download_path: PathBuf,
-    pub game_path: PathBuf,
+    pub base_dir: PathBuf,      // Diretório base único
+    pub download_path: PathBuf, // Subdiretório para downloads
+    pub game_path: PathBuf,     // Subdiretório para arquivos do jogo
 }
 
 impl AppDirs {
-    /// Obtém os diretórios do projeto usando o ProjectDirs
-    pub fn get_project_dirs() -> Option<ProjectDirs> {
-        ProjectDirs::from(
-            "com.arcadiaot.launcher",
-            "Arcadia-Organization",
-            "ArcadiaOT-Launcher",
-        )
+    /// Obtém o diretório base que o egui já está criando
+    pub fn get_base_dir() -> Option<PathBuf> {
+        // Obter %APPDATA% no Windows onde o egui cria a pasta "ArcadiaOT Launcher"
+        match env::var("APPDATA") {
+            Ok(appdata) => {
+                let base_dir = Path::new(&appdata).join("ArcadiaOT Launcher");
+                Some(base_dir)
+            }
+            Err(_) => {
+                // Fallback para outros sistemas operacionais
+                if let Some(home) = dirs::home_dir() {
+                    let base_dir = home.join(".arcadiaot-launcher");
+                    Some(base_dir)
+                } else {
+                    None
+                }
+            }
+        }
     }
 
     /// Inicializa os diretórios da aplicação, criando-os se necessário
     pub fn init() -> Result<Self> {
-        let app_dirs =
-            Self::get_project_dirs().context("Não foi possível criar diretórios da aplicação")?;
+        let base_dir = Self::get_base_dir()
+            .context("Não foi possível obter o diretório base da aplicação")?;
 
-        let download_path = app_dirs.cache_dir().to_path_buf();
-        let game_path = app_dirs.data_dir().to_path_buf();
+        // Criar subdiretórios dentro do diretório base único
+        let download_path = base_dir.join("downloads");
+        let game_path = base_dir.join("game");
 
+        fs::create_dir_all(&base_dir)
+            .context("Não foi possível criar diretório base")?;
         fs::create_dir_all(&download_path)
             .context("Não foi possível criar diretório de download")?;
-        fs::create_dir_all(&game_path).context("Não foi possível criar diretório do jogo")?;
+        fs::create_dir_all(&game_path)
+            .context("Não foi possível criar diretório do jogo")?;
 
         Ok(Self {
+            base_dir,
             download_path,
             game_path,
         })
@@ -39,7 +57,7 @@ impl AppDirs {
 
     /// Retorna o caminho para o arquivo de sinal usado para comunicação entre instâncias
     pub fn get_signal_file_path() -> Option<PathBuf> {
-        Self::get_project_dirs().map(|dirs| dirs.data_dir().join("show.signal"))
+        Self::get_base_dir().map(|dir| dir.join("show.signal"))
     }
 
     /// Obtem todos os caminhos de client.exe no diretório do jogo
@@ -50,15 +68,15 @@ impl AppDirs {
             Ok(paths) => {
                 let valid_paths: Vec<PathBuf> = paths.filter_map(Result::ok).collect();
 
-                println!("Encontrados {} caminhos para client.exe", valid_paths.len());
+                info!("Encontrados {} caminhos para client.exe", valid_paths.len());
                 for (i, path) in valid_paths.iter().enumerate() {
-                    println!("  [{}]: {} ", i, path.display());
+                    info!("  [{}]: {} ", i, path.display());
                 }
 
                 valid_paths
             }
             Err(e) => {
-                eprintln!("Erro ao buscar caminhos do cliente: {}", e);
+                error!("Erro ao buscar caminhos do cliente: {}", e);
                 Vec::new()
             }
         }

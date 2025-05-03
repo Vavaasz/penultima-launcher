@@ -1,9 +1,11 @@
+use std::os::windows::process::CommandExt;
 use anyhow::{Context, Result};
 use glob::glob;
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use log::info;
 use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
 
 // Estrutura para rastrear o estado da janela
@@ -49,43 +51,47 @@ impl GameClient {
     }
 
     pub fn launch_main_client(&mut self, game_path: &PathBuf) -> Result<()> {
-        println!("Tentando iniciar o jogo...");
+        info!("Tentando iniciar o jogo...");
 
         // Procura o client.exe em subdiretórios da pasta data
         let glob_pattern = format!("{}/*/bin/client.exe", game_path.display());
-        println!("Buscando client.exe com padrão: {}", glob_pattern);
+        info!("Buscando client.exe com padrão: {}", glob_pattern);
 
         let entries = glob(&glob_pattern).context("Falha ao procurar client.exe")?;
 
         let client_paths: Vec<_> = entries.filter_map(Result::ok).collect();
 
         if client_paths.is_empty() {
-            println!("client.exe não foi encontrado!");
+            info!("client.exe não foi encontrado!");
             return Err(anyhow::anyhow!("client.exe não encontrado"));
         }
 
-        println!(
+        info!(
             "Encontrados {} caminhos para client.exe",
             client_paths.len()
         );
         for (i, path) in client_paths.iter().enumerate() {
-            println!("  [{}]: {}", i, path.display());
+            info!("  [{}]: {}", i, path.display());
         }
 
         let client_path = &client_paths[0];
-        println!("Usando client.exe: {}", client_path.display());
+        info!("Usando client.exe: {}", client_path.display());
 
-        println!(
+        info!(
             "Diretório de trabalho: {}",
             client_path.parent().unwrap().display()
         );
 
+        // Definir constante para alta prioridade (Windows)
+        const HIGH_PRIORITY_CLASS: u32 = 0x00000080;
+
         let process = Command::new(&client_path)
             .current_dir(client_path.parent().unwrap())
+            .creation_flags(HIGH_PRIORITY_CLASS) // Definir prioridade alta
             .spawn()
             .context("Falha ao iniciar o jogo")?;
 
-        println!("Processo iniciado com sucesso: {:?}", process.id());
+        info!("Processo iniciado com sucesso com prioridade alta: {:?}", process.id());
 
         // Armazenar o processo do jogo principal
         self.game_process = Some(process);
@@ -192,7 +198,7 @@ pub fn show_window(window_state: &Arc<Mutex<WindowState>>) {
 
         let hwnd = FindWindowW(null_mut(), title.as_ptr());
         if !hwnd.is_null() {
-            println!("Janela encontrada, restaurando...");
+            info!("Janela encontrada, restaurando...");
 
             // Traz a janela para frente
             SetForegroundWindow(hwnd);
@@ -206,7 +212,7 @@ pub fn show_window(window_state: &Arc<Mutex<WindowState>>) {
             state.visible = true;
             state.last_show = Instant::now();
         } else {
-            println!("Janela não encontrada!");
+            info!("Janela não encontrada!");
         }
     }
 }

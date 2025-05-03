@@ -1,19 +1,15 @@
 [package]
-name = "game-launcher"
+name = "arcadia-launcher"
 version = "0.1.0"
 edition = "2021"
 
-# Configuração para desabilitar o console
-[package.metadata]
-windows_subsystem = "windows"
-
 # Configuração para recursos do Windows
 [package.metadata.winres]
-OriginalFilename = "game-launcher.exe"
-FileDescription = "Game Launcher"
-ProductName = "Game Launcher"
+OriginalFilename = "arcadia-launcher.exe"
+FileDescription = "Arcadia Launcher"
+ProductName = "Arcadia Launcher"
 ProductVersion = "1.0.0"
-LegalCopyright = "Copyright 2024"
+LegalCopyright = "Copyright 2025"
 
 [profile.dev]
 opt-level = 0 # Nenhuma otimização para tempos de compilação mais rápidos
@@ -26,33 +22,45 @@ panic = "unwind" # Permite depuração mais detalhada
 [profile.release]
 opt-level = 3 # Otimização agressiva para tamanho reduzido
 debug = false # Sem informações de depuração
-overflow-checks = true # Verificações de estouro de inteiros
-lto = "fat" # Otimização de tempo de link
+debug-assertions = false # Desativar asserções para maior desempenho
+overflow-checks = false # Desativar verificações de estouro para maior velocidade
+lto = "fat" # Otimização de tempo de link mais agressiva
 codegen-units = 1 # Unidades de geração de código única para otimização máxima
 panic = "abort" # Abortar em caso de pânico para reduzir o tamanho do binário
 incremental = false # Sem compilação incremental para otimização máxima
 
 [dependencies]
-tokio = { version = "1.35", features = ["full"] }
-eframe = { version = "0.31.0", features = ["default_fonts", "persistence"] }
-egui = "0.31.0"
-reqwest = { version = "0.12.12", features = ["json", "stream"] }
-directories = "6.0.0"
-anyhow = "1.0"
-winapi = { version = "0.3", features = ["winuser", "windef", "processthreadsapi", "memoryapi", "consoleapi"] }
+tokio = { version = "1.44.2", features = ["full"] }
+eframe = { version = "0.31.1", features = ["default_fonts", "persistence"] }
+egui = "0.31.1"
+reqwest = { version = "0.12.15", features = ["json", "stream"] }
+anyhow = "1.0.98"
+winapi = { version = "0.3.9", features = ["winuser", "windef", "processthreadsapi", "memoryapi", "consoleapi"] }
 windows = { version = "0.61.1", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp"] }
-zip = "2.2.2"
-futures-util = "0.3"
-semver = "1.0"
-log = "0.4"
-env_logger = "0.11"
-glob = "0.3.1"
-tray-icon = "0.20.0"
-image = "0.25.5"
-native-tls = "0.2"
-tokio-native-tls = "0.3"
+zip = "2.6.1"
+futures-util = "0.3.31"
+semver = "1.0.26"
+log = "0.4.27"
+glob = "0.3.2"
+tray-icon = "0.20.1"
+image = "0.25.6"
+native-tls = "0.2.14"
+tokio-native-tls = "0.3.1"
 single-instance = "0.3.3"
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.5.37", features = ["derive"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+chrono = "0.4.41"
+dirs = "6.0.0"
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
+
+# Configuração específica para crate principal
+[profile.release.package.arcadia-launcher]
+opt-level = 3 # Garantir otimização máxima para o binário principal
+
+# Melhorar otimização de dependências
+[profile.release.build-override]
+opt-level = 3
+codegen-units = 1

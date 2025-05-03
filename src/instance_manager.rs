@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+use log::info;
 
 pub struct InstanceManager {
     instance: Option<SingleInstance>,
@@ -36,7 +37,7 @@ impl InstanceManager {
     // Sinaliza para a instância em execução mostrar a janela
     pub fn signal_running_instance(&self, data_dir: &PathBuf) -> Result<()> {
         let signal_file = data_dir.join("show.signal");
-        println!(
+        info!(
             "Sinalizando para instância existente através do arquivo: {:?}",
             signal_file
         );
@@ -71,7 +72,7 @@ impl InstanceManager {
 
                     let signal_file = data_dir.join("show.signal");
                     if signal_file.exists() {
-                        println!("Sinal de mostrar janela detectado!");
+                        info!("Sinal de mostrar janela detectado!");
                         let _ = fs::remove_file(&signal_file);
                         
                         // Usar o método do WindowManager em vez da função independente

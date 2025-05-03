@@ -14,6 +14,8 @@ use std::time::Duration;
 
 /// Estrutura para gerenciar as operações de atualização do jogo
 pub struct UpdateManager {
+    /// Caminho para o diretório base da aplicação
+    base_dir: PathBuf,
     /// Caminho para o diretório de download
     download_path: PathBuf,
     /// Caminho para o diretório do jogo
@@ -23,17 +25,234 @@ pub struct UpdateManager {
 impl UpdateManager {
     /// Cria uma nova instância do UpdateManager
     pub fn new(download_path: PathBuf, game_path: PathBuf) -> Self {
+        // Obtém o diretório pai do download_path como base_dir
+        let base_dir = download_path.parent()
+            .unwrap_or(&download_path)
+            .to_path_buf();
+        
         Self {
+            base_dir,
             download_path,
             game_path,
         }
     }
 
+    /// Faz backup dos arquivos importantes para um diretório específico
+    fn backup_important_files_to(&self, backup_dir: &PathBuf) -> Result<()> {
+        fs::create_dir_all(&backup_dir)?;
+
+        info!("Fazendo backup em: {:?}", backup_dir);
+
+        // 1. Backup do clientoptions.json
+        let conf_dir = self.game_path.join("ArcadiaOT").join("conf");
+        let client_options = conf_dir.join("clientoptions.json");
+
+        info!("Verificando arquivo de configuração: {:?}", client_options);
+
+        if client_options.exists() {
+            info!("Arquivo de configuração encontrado, fazendo backup...");
+            let backup_conf_dir = backup_dir.join("conf");
+            fs::create_dir_all(&backup_conf_dir)?;
+
+            let target_path = backup_conf_dir.join("clientoptions.json");
+            info!("Copiando de {:?} para {:?}", client_options, target_path);
+
+            match fs::copy(&client_options, &target_path) {
+                Ok(bytes) => info!("Backup de clientoptions.json concluído: {} bytes", bytes),
+                Err(e) => {
+                    info!("Erro ao copiar clientoptions.json: {}", e);
+                    // Continuar mesmo em caso de erro neste arquivo
+                }
+            }
+        } else {
+            info!("Arquivo de configuração não encontrado em: {:?}", client_options);
+        }
+
+        // 2. Backup do settings.json (novo)
+        let settings_file = self.game_path.join("settings.json");
+        info!("Verificando arquivo de configurações globais: {:?}", settings_file);
+
+        if settings_file.exists() {
+            info!("Arquivo de configurações globais encontrado, fazendo backup...");
+
+            let target_path = backup_dir.join("settings.json");
+            info!("Copiando de {:?} para {:?}", settings_file, target_path);
+
+            match fs::copy(&settings_file, &target_path) {
+                Ok(bytes) => info!("Backup de settings.json concluído: {} bytes", bytes),
+                Err(e) => {
+                    info!("Erro ao copiar settings.json: {}", e);
+                    // Continuar mesmo em caso de erro neste arquivo
+                }
+            }
+        } else {
+            info!("Arquivo de configurações globais não encontrado em: {:?}", settings_file);
+        }
+
+        // 3. Backup do diretório characterdata
+        let char_data_dir = self.game_path.join("ArcadiaOT").join("characterdata");
+        info!("Verificando diretório de personagens: {:?}", char_data_dir);
+
+        if char_data_dir.exists() {
+            info!("Diretório de personagens encontrado, fazendo backup...");
+            let backup_char_dir = backup_dir.join("characterdata");
+
+            if backup_char_dir.exists() {
+                info!("Removendo diretório de backup antigo: {:?}", backup_char_dir);
+                fs::remove_dir_all(&backup_char_dir)?;
+            }
+
+            fs::create_dir_all(&backup_char_dir)?;
+
+            // Copiar todo o conteúdo do diretório characterdata
+            match fs::read_dir(&char_data_dir) {
+                Ok(entries) => {
+                    for entry_result in entries {
+                        match entry_result {
+                            Ok(entry) => {
+                                let path = entry.path();
+                                if path.is_file() {
+                                    let file_name = path.file_name().unwrap();
+                                    let target_path = backup_char_dir.join(file_name);
+
+                                    info!("Copiando {:?} para {:?}", path, target_path);
+
+                                    match fs::copy(&path, &target_path) {
+                                        Ok(bytes) => info!("Arquivo copiado: {} bytes", bytes),
+                                        Err(e) => {
+                                            info!("Erro ao copiar arquivo {:?}: {}", path, e);
+                                            // Continue mesmo com erro em um arquivo
+                                        }
+                                    }
+                                }
+                            },
+                            Err(e) => {
+                                info!("Erro ao ler entrada do diretório: {}", e);
+                            }
+                        }
+                    }
+                    info!("Backup de diretório de personagens concluído");
+                },
+                Err(e) => {
+                    info!("Erro ao ler diretório de personagens: {}", e);
+                    // Continuar mesmo em caso de erro
+                }
+            }
+        } else {
+            info!("Diretório de personagens não encontrado em: {:?}", char_data_dir);
+        }
+
+        info!("Processo de backup concluído com sucesso");
+        Ok(())
+    }
+
+    /// Restaura os arquivos importantes de um diretório específico
+    fn restore_important_files_from(&self, backup_dir: &PathBuf) -> Result<()> {
+        info!("Restaurando arquivos de: {:?}", backup_dir);
+
+        if !backup_dir.exists() {
+            info!("Diretório de backup não encontrado: {:?}", backup_dir);
+            return Ok(());
+        }
+
+        // 1. Restaurar clientoptions.json
+        let backup_client_options = backup_dir.join("conf").join("clientoptions.json");
+        info!("Verificando backup de configuração: {:?}", backup_client_options);
+
+        if backup_client_options.exists() {
+            let conf_dir = self.game_path.join("ArcadiaOT").join("conf");
+            info!("Criando diretório de configuração: {:?}", conf_dir);
+            fs::create_dir_all(&conf_dir)?;
+
+            let target_path = conf_dir.join("clientoptions.json");
+            info!("Restaurando de {:?} para {:?}", backup_client_options, target_path);
+
+            match fs::copy(&backup_client_options, &target_path) {
+                Ok(bytes) => info!("Restauração de clientoptions.json concluída: {} bytes", bytes),
+                Err(e) => {
+                    info!("Erro ao restaurar clientoptions.json: {}", e);
+                    // Continuar mesmo em caso de erro
+                }
+            }
+        } else {
+            info!("Backup de configuração não encontrado");
+        }
+
+        // 2. Restaurar settings.json (novo)
+        let backup_settings = backup_dir.join("settings.json");
+        info!("Verificando backup de configurações globais: {:?}", backup_settings);
+
+        if backup_settings.exists() {
+            let target_path = self.game_path.join("settings.json");
+            info!("Restaurando de {:?} para {:?}", backup_settings, target_path);
+
+            match fs::copy(&backup_settings, &target_path) {
+                Ok(bytes) => info!("Restauração de settings.json concluída: {} bytes", bytes),
+                Err(e) => {
+                    info!("Erro ao restaurar settings.json: {}", e);
+                    // Continuar mesmo em caso de erro
+                }
+            }
+        } else {
+            info!("Backup de configurações globais não encontrado");
+        }
+
+        // 3. Restaurar diretório characterdata
+        let backup_char_dir = backup_dir.join("characterdata");
+        info!("Verificando backup de personagens: {:?}", backup_char_dir);
+
+        if backup_char_dir.exists() {
+            let char_data_dir = self.game_path.join("ArcadiaOT").join("characterdata");
+            info!("Criando diretório de personagens: {:?}", char_data_dir);
+            fs::create_dir_all(&char_data_dir)?;
+
+            // Copiar todo o conteúdo do diretório characterdata de volta
+            match fs::read_dir(&backup_char_dir) {
+                Ok(entries) => {
+                    for entry_result in entries {
+                        match entry_result {
+                            Ok(entry) => {
+                                let path = entry.path();
+                                if path.is_file() {
+                                    let file_name = path.file_name().unwrap();
+                                    let target_path = char_data_dir.join(file_name);
+
+                                    info!("Restaurando {:?} para {:?}", path, target_path);
+
+                                    match fs::copy(&path, &target_path) {
+                                        Ok(bytes) => info!("Arquivo restaurado: {} bytes", bytes),
+                                        Err(e) => {
+                                            info!("Erro ao restaurar arquivo {:?}: {}", path, e);
+                                            // Continue mesmo com erro em um arquivo
+                                        }
+                                    }
+                                }
+                            },
+                            Err(e) => {
+                                info!("Erro ao ler entrada do diretório de backup: {}", e);
+                            }
+                        }
+                    }
+                    info!("Restauração de diretório de personagens concluída");
+                },
+                Err(e) => {
+                    info!("Erro ao ler diretório de backup de personagens: {}", e);
+                    // Continuar mesmo em caso de erro
+                }
+            }
+        } else {
+            info!("Backup de diretório de personagens não encontrado");
+        }
+
+        info!("Processo de restauração concluído com sucesso");
+        Ok(())
+    }
+
     /// Busca a versão mais recente no GitHub
     async fn fetch_github_version() -> Result<String> {
-        println!("Iniciando verificação de versão no GitHub...");
+        info!("Iniciando verificação de versão no GitHub...");
         let url = "https://raw.githubusercontent.com/Arcadia-OT/arcadia-client/main/version.txt";
-        println!("Conectando a: {}", url);
+        info!("Conectando a: {}", url);
 
         // Criar um cliente com timeout
         let client = reqwest::Client::builder()
@@ -44,22 +263,22 @@ impl UpdateManager {
         match client.get(url).send().await {
             Ok(response) => {
                 let status = response.status();
-                println!("Status HTTP: {}", status);
+                info!("Status HTTP: {}", status);
 
                 if status.is_success() {
                     match response.text().await {
                         Ok(version) => {
                             let version = version.trim().to_string();
-                            println!("Versão no GitHub: {}", version);
+                            info!("Versão no GitHub: {}", version);
                             Ok(version)
                         }
                         Err(e) => {
-                            println!("Erro ao ler resposta: {}", e);
+                            info!("Erro ao ler resposta: {}", e);
                             Err(anyhow::anyhow!("Erro ao ler resposta do servidor: {}", e))
                         }
                     }
                 } else {
-                    println!("Resposta HTTP não foi bem-sucedida: {}", status);
+                    info!("Resposta HTTP não foi bem-sucedida: {}", status);
                     Err(anyhow::anyhow!(
                         "Erro ao verificar versão: Servidor retornou {}",
                         status
@@ -69,17 +288,17 @@ impl UpdateManager {
             Err(e) => {
                 // Tratamento específico para timeout e outros erros de conexão
                 if e.is_timeout() {
-                    println!("Timeout na conexão com o servidor");
+                    info!("Timeout na conexão com o servidor");
                     Err(anyhow::anyhow!(
                         "Tempo de conexão esgotado. Verifique sua internet."
                     ))
                 } else if e.is_connect() {
-                    println!("Falha na conexão com o servidor: {}", e);
+                    info!("Falha na conexão com o servidor: {}", e);
                     Err(anyhow::anyhow!(
                         "Não foi possível se conectar ao servidor. Verifique sua internet."
                     ))
                 } else {
-                    println!("Erro na requisição: {}", e);
+                    info!("Erro na requisição: {}", e);
                     Err(anyhow::anyhow!("Erro ao verificar versão: {}", e))
                 }
             }
@@ -118,12 +337,12 @@ impl UpdateManager {
         message_sender.send(LauncherMessage::SetProcessing(true))?;
         message_sender.send(LauncherMessage::DownloadProgress(0.2))?; // Progresso inicial
 
-        println!("Buscando versão mais recente...");
+        info!("Buscando versão mais recente...");
         // Buscar versão do GitHub
         let latest_version = match Self::fetch_github_version().await {
             Ok(version) => version,
             Err(e) => {
-                println!("Erro ao buscar versão: {}", e);
+                info!("Erro ao buscar versão: {}", e);
                 message_sender.send(LauncherMessage::SetStatus(format!(
                     "Erro ao verificar versão: {}",
                     e
@@ -139,17 +358,17 @@ impl UpdateManager {
         )))?;
         message_sender.send(LauncherMessage::DownloadProgress(0.4))?;
 
-        println!("Verificando versão local...");
+        info!("Verificando versão local...");
         // Obter versão local
         let current_version =
             if let Ok(content) = fs::read_to_string(self.game_path.join("version.txt")) {
                 content.trim().to_string()
             } else {
-                println!("Arquivo de versão não encontrado, usando 0.0.0");
+                info!("Arquivo de versão não encontrado, usando 0.0.0");
                 "0.0.0".to_string()
             };
 
-        println!(
+        info!(
             "Versão atual: {}, Versão mais recente: {}",
             current_version, latest_version
         );
@@ -158,9 +377,9 @@ impl UpdateManager {
 
         // Comparar versões
         if Self::version_needs_update(&current_version, &latest_version) {
-            println!("Atualização necessária. Iniciando download...");
+            info!("Atualização necessária. Iniciando download...");
             message_sender.send(LauncherMessage::SetStatus(format!(
-                "Nova versão disponível: {} → {}",
+                "Nova versão disponível: {} para {}",
                 current_version, latest_version
             )))?;
             message_sender.send(LauncherMessage::DownloadProgress(0.8))?;
@@ -178,7 +397,7 @@ impl UpdateManager {
                 message_sender.clone(),
             ).await?;
         } else {
-            println!("O jogo já está atualizado.");
+            info!("O jogo já está atualizado.");
             message_sender.send(LauncherMessage::SetStatus(format!(
                 "Jogo já está na versão mais recente ({})",
                 current_version
@@ -201,10 +420,26 @@ impl UpdateManager {
         message_sender: mpsc::UnboundedSender<LauncherMessage>,
     ) -> Result<()> {
         message_sender.send(LauncherMessage::SetStatus(
+            "Fazendo backup dos arquivos importantes...".to_string(),
+        ))?;
+
+        // Backup temporário em diretório fora da pasta de downloads
+        let temp_backup_dir = self.base_dir.join("temp_backup");
+
+        // Fazer backup dos arquivos importantes
+        if let Err(e) = self.backup_important_files_to(&temp_backup_dir) {
+            info!("Erro ao fazer backup dos arquivos: {}", e);
+            message_sender.send(LauncherMessage::SetStatus(
+                format!("Erro ao fazer backup dos arquivos: {}", e),
+            ))?;
+            return Err(e.into());
+        }
+
+        message_sender.send(LauncherMessage::SetStatus(
             "Limpando diretórios...".to_string(),
         ))?;
 
-        // Limpar diretório de download
+        // Limpar diretório de download preservando o backup
         if self.download_path.exists() {
             info!("Limpando diretório de download: {:?}", self.download_path);
             fs::remove_dir_all(&self.download_path)?;
@@ -223,7 +458,29 @@ impl UpdateManager {
         ))?;
 
         // Chamar check_for_updates para baixar tudo novamente
-        self.check_for_updates(message_sender).await
+        let result = self.check_for_updates(message_sender.clone()).await;
+
+        // Restaurar arquivos importantes após a atualização
+        message_sender.send(LauncherMessage::SetStatus(
+            "Restaurando arquivos importantes...".to_string(),
+        ))?;
+
+        if let Err(e) = self.restore_important_files_from(&temp_backup_dir) {
+            info!("Erro ao restaurar arquivos: {}", e);
+            message_sender.send(LauncherMessage::SetStatus(
+                format!("Erro ao restaurar arquivos: {}", e),
+            ))?;
+            return Err(e.into());
+        }
+
+        // Limpar o backup temporário
+        if temp_backup_dir.exists() {
+            if let Err(e) = fs::remove_dir_all(&temp_backup_dir) {
+                info!("Aviso: Erro ao remover diretório de backup temporário: {}", e);
+            }
+        }
+
+        result
     }
 
     /// Baixa e instala uma versão do jogo
@@ -234,6 +491,23 @@ impl UpdateManager {
         message_sender: mpsc::UnboundedSender<LauncherMessage>,
     ) -> Result<()> {
         message_sender.send(LauncherMessage::SetProcessing(true))?;
+
+        // Backup temporário em diretório fora da pasta de downloads
+        let temp_backup_dir = self.base_dir.join("temp_backup");
+        
+        // Fazer backup dos arquivos importantes antes do download
+        message_sender.send(LauncherMessage::SetStatus(
+            "Fazendo backup dos arquivos importantes...".to_string(),
+        ))?;
+        
+        if let Err(e) = self.backup_important_files_to(&temp_backup_dir) {
+            info!("Erro ao fazer backup dos arquivos: {}", e);
+            message_sender.send(LauncherMessage::SetStatus(
+                format!("Erro ao fazer backup dos arquivos: {}", e),
+            ))?;
+            return Err(e.into());
+        }
+
         message_sender.send(LauncherMessage::SetStatus(
             "Iniciando download...".to_string(),
         ))?;
@@ -364,6 +638,19 @@ impl UpdateManager {
             }
         }
 
+        // Após extrair todos os arquivos e antes de limpar o zip, restaurar os arquivos importantes
+        message_sender.send(LauncherMessage::SetStatus(
+            "Restaurando arquivos importantes...".to_string(),
+        ))?;
+
+        if let Err(e) = self.restore_important_files_from(&temp_backup_dir) {
+            info!("Erro ao restaurar arquivos: {}", e);
+            message_sender.send(LauncherMessage::SetStatus(
+                format!("Erro ao restaurar arquivos: {}", e),
+            ))?;
+            return Err(e.into());
+        }
+
         // Limpar arquivo zip após extração
         fs::remove_file(&zip_path).context("Falha ao remover arquivo zip temporário")?;
 
@@ -411,51 +698,51 @@ impl UpdateManager {
     }
 
     pub async fn check_initial_updates(game_path: &PathBuf) -> Result<bool, Error> {
-        println!("Verificando arquivos do jogo em: {:?}", game_path);
+        info!("Verificando arquivos do jogo em: {:?}", game_path);
 
         // Criar diretório do jogo se não existir
         if !game_path.exists() {
-            println!("Diretório do jogo não existe. Criando...");
+            info!("Diretório do jogo não existe. Criando...");
             if let Err(e) = fs::create_dir_all(game_path) {
-                println!("Erro ao criar diretório do jogo: {}", e);
+                info!("Erro ao criar diretório do jogo: {}", e);
                 return Ok(true); // Precisa atualizar
             }
         }
 
         // Verificar se os arquivos principais do jogo existem
         let client_exe_pattern = format!("{}/*/bin/client.exe", game_path.display());
-        println!("Buscando client.exe com padrão: {}", client_exe_pattern);
+        info!("Buscando client.exe com padrão: {}", client_exe_pattern);
 
         let client_exe_exists = glob(&client_exe_pattern)
             .map(|entries| {
                 let paths: Vec<_> = entries.filter_map(Result::ok).collect();
                 if !paths.is_empty() {
-                    println!("Encontrados {} arquivos client.exe:", paths.len());
+                    info!("Encontrados {} arquivos client.exe:", paths.len());
                     for (i, path) in paths.iter().enumerate() {
-                        println!("  [{}]: {}", i, path.display());
+                        info!("  [{}]: {}", i, path.display());
                     }
                     true
                 } else {
-                    println!("Nenhum client.exe encontrado");
+                    info!("Nenhum client.exe encontrado");
                     false
                 }
             })
             .unwrap_or_else(|e| {
-                println!("Erro ao buscar client.exe: {}", e);
+                info!("Erro ao buscar client.exe: {}", e);
                 false
             });
 
         if !client_exe_exists {
-            println!("Client.exe não encontrado. Atualização necessária.");
+            info!("Client.exe não encontrado. Atualização necessária.");
             return Ok(true); // Precisa atualizar se não encontrar o cliente
         }
 
         // Buscar a versão mais recente do GitHub
-        println!("Verificando versão mais recente no GitHub...");
+        info!("Verificando versão mais recente no GitHub...");
         let latest_version_result = UpdateManager::fetch_github_version().await;
 
         if let Err(e) = &latest_version_result {
-            println!("Erro ao buscar versão do GitHub: {}", e);
+            info!("Erro ao buscar versão do GitHub: {}", e);
             // Em caso de erro ao buscar, verificamos se pelo menos temos os arquivos locais
             return Ok(!client_exe_exists);
         }
@@ -464,26 +751,26 @@ impl UpdateManager {
 
         // Obter versão atual do arquivo version.txt local
         let version_file_path = game_path.join("version.txt");
-        println!("Verificando arquivo de versão: {:?}", version_file_path);
+        info!("Verificando arquivo de versão: {:?}", version_file_path);
 
         let current_version = if version_file_path.exists() {
             match fs::read_to_string(&version_file_path) {
                 Ok(content) => {
                     let version = content.trim().to_string();
-                    println!("Versão atual lida do arquivo: {}", version);
+                    info!("Versão atual lida do arquivo: {}", version);
                     version
                 }
                 Err(e) => {
-                    println!("Erro ao ler arquivo de versão: {}", e);
+                    info!("Erro ao ler arquivo de versão: {}", e);
                     "0.0.0".to_string()
                 }
             }
         } else {
-            println!("Arquivo version.txt não encontrado.");
+            info!("Arquivo version.txt não encontrado.");
             "0.0.0".to_string()
         };
 
-        println!(
+        info!(
             "Versão atual: {}, Versão mais recente: {}",
             current_version, latest_version
         );
@@ -491,7 +778,7 @@ impl UpdateManager {
         // Verifica se há necessidade de atualização
         let needs_update = Self::version_needs_update(&current_version, &latest_version);
 
-        println!("Necessita atualização? {}", needs_update);
+        info!("Necessita atualização? {}", needs_update);
 
         Ok(needs_update)
     }
