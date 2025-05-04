@@ -2,7 +2,7 @@ use clap::Parser;
 
 /// Estrutura para os argumentos de linha de comando
 #[derive(Parser, Debug)]
-#[clap(name = "Game Launcher", about = "Launcher para ArcadiaOT")]
+#[clap(name = "Ultima Launcher", about = "Launcher para UltimaOT")]
 pub struct Args {
     /// Mostra o console do launcher
     #[clap(long, short = 'c')]

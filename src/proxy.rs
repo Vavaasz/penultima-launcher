@@ -113,6 +113,7 @@ async fn handle_connection(
     Ok(())
 }
 
+#[allow(dead_code)]
 async fn configure_tcp_stream(stream: TcpStream) -> Result<TcpStream> {
     // Ativar TCP_NODELAY para evitar atrasos no envio de pequenos pacotes
     stream.set_nodelay(true)?;
@@ -120,6 +121,7 @@ async fn configure_tcp_stream(stream: TcpStream) -> Result<TcpStream> {
 }
 
 /// Manipula conexões HTTPS com suporte a TLS.
+#[allow(dead_code)]
 async fn handle_https_connection(
     mut client_stream: TcpStream,
     target_host: &str,
@@ -227,6 +229,7 @@ async fn handle_https_connection(
     Ok(())
 }
 
+#[allow(dead_code)]
 async fn handle_tcp_connection(
     client_stream: TcpStream,
     target_host: &str,
@@ -336,6 +339,7 @@ fn modify_http_request(request: &str, target_host: &str) -> String {
 }
 
 /// Executa o proxy, escutando em todas as portas configuradas.
+#[allow(dead_code)]
 pub async fn run_proxy(config: Arc<ProxyConfig>) -> Result<()> {
     // Configura os listeners para cada porta
     let login_listener = TcpListener::bind(format!("127.0.0.1:{}", config.login_port)).await?;

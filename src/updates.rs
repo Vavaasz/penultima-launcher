@@ -44,7 +44,7 @@ impl UpdateManager {
         info!("Fazendo backup em: {:?}", backup_dir);
 
         // 1. Backup do clientoptions.json
-        let conf_dir = self.game_path.join("ArcadiaOT").join("conf");
+        let conf_dir = self.game_path.join("UltimaOT").join("conf");
         let client_options = conf_dir.join("clientoptions.json");
 
         info!("Verificando arquivo de configuração: {:?}", client_options);
@@ -90,7 +90,7 @@ impl UpdateManager {
         }
 
         // 3. Backup do diretório characterdata
-        let char_data_dir = self.game_path.join("ArcadiaOT").join("characterdata");
+        let char_data_dir = self.game_path.join("UltimaOT").join("characterdata");
         info!("Verificando diretório de personagens: {:?}", char_data_dir);
 
         if char_data_dir.exists() {
@@ -160,7 +160,7 @@ impl UpdateManager {
         info!("Verificando backup de configuração: {:?}", backup_client_options);
 
         if backup_client_options.exists() {
-            let conf_dir = self.game_path.join("ArcadiaOT").join("conf");
+            let conf_dir = self.game_path.join("UltimaOT").join("conf");
             info!("Criando diretório de configuração: {:?}", conf_dir);
             fs::create_dir_all(&conf_dir)?;
 
@@ -202,7 +202,7 @@ impl UpdateManager {
         info!("Verificando backup de personagens: {:?}", backup_char_dir);
 
         if backup_char_dir.exists() {
-            let char_data_dir = self.game_path.join("ArcadiaOT").join("characterdata");
+            let char_data_dir = self.game_path.join("UltimaOT").join("characterdata");
             info!("Criando diretório de personagens: {:?}", char_data_dir);
             fs::create_dir_all(&char_data_dir)?;
 
@@ -251,7 +251,7 @@ impl UpdateManager {
     /// Busca a versão mais recente no GitHub
     async fn fetch_github_version() -> Result<String> {
         info!("Iniciando verificação de versão no GitHub...");
-        let url = "https://raw.githubusercontent.com/Arcadia-OT/arcadia-client/main/version.txt";
+        let url = "https://raw.githubusercontent.com/vavasz/Ultima-Launcher/main/version.txt";
         info!("Conectando a: {}", url);
 
         // Criar um cliente com timeout
@@ -390,7 +390,7 @@ impl UpdateManager {
             // Iniciar download
             self.download_release(
                 &format!(
-                    "https://github.com/Arcadia-OT/arcadia-client/releases/download/{}/ArcadiaOT.zip",
+                    "https://github.com/vavasz/Ultima-Launcher/releases/download/{}/UltimaOT.zip",
                     latest_version
                 ),
                 &latest_version,

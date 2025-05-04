@@ -26,7 +26,7 @@ impl WindowManager {
 
     /// Carrega o ícone da aplicação
     pub fn load_icon() -> Option<Arc<IconData>> {
-        let icon = include_bytes!("../assets/icon.ico");
+        let icon = include_bytes!("../assets/ultima-logo.ico");
         let (icon_rgba, icon_width, icon_height) = {
             let image = image::load_from_memory(icon).ok()?;
             let image = image.into_rgba8();
@@ -49,7 +49,7 @@ impl WindowManager {
             use std::os::windows::ffi::OsStrExt;
             use std::ptr::null_mut;
 
-            let title: Vec<u16> = OsStr::new("ArcadiaOT Launcher")
+            let title: Vec<u16> = OsStr::new("UltimaOT Launcher")
                 .encode_wide()
                 .chain(Some(0))
                 .collect();
@@ -85,7 +85,7 @@ impl WindowManager {
             use std::os::windows::ffi::OsStrExt;
             use std::ptr::null_mut;
 
-            let title: Vec<u16> = OsStr::new("ArcadiaOT Launcher")
+            let title: Vec<u16> = OsStr::new("UltimaOT Launcher")
                 .encode_wide()
                 .chain(Some(0))
                 .collect();
@@ -114,7 +114,7 @@ impl WindowManager {
                 .with_resizable(false)
                 .with_maximized(false)
                 .with_maximize_button(false)
-                .with_title("ArcadiaOT Launcher")
+                .with_title("UltimaOT Launcher")
                 .with_decorations(true)
                 .with_transparent(false)
                 .with_active(true)

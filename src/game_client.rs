@@ -191,7 +191,7 @@ pub fn show_window(window_state: &Arc<Mutex<WindowState>>) {
             HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SW_RESTORE, SW_SHOW,
         };
 
-        let title: Vec<u16> = OsStr::new("ArcadiaOT Launcher")
+        let title: Vec<u16> = OsStr::new("UltimaOT Launcher")
             .encode_wide()
             .chain(Some(0))
             .collect();

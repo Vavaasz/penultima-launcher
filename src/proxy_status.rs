@@ -24,6 +24,7 @@ impl Default for ProxyStatus {
     }
 }
 
+#[allow(dead_code)]
 impl ProxyStatus {
     pub fn new() -> Self {
         Self::default()

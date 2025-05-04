@@ -79,27 +79,32 @@ pub fn init(enable: bool, level: Level) -> Result<(), SetLoggerError> {
 }
 
 /// Habilita ou desabilita o logging em tempo de execução
+#[allow(dead_code)]
 pub fn set_enabled(enable: bool) {
     LOGGER.enabled.store(enable, Ordering::Relaxed);
 }
 
 /// Verifica se o logging está habilitado
+#[allow(dead_code)]
 pub fn is_enabled() -> bool {
     LOGGER.enabled.load(Ordering::Relaxed)
 }
 
 /// Define o nível de log em tempo de execução
+#[allow(dead_code)]
 pub fn set_level(level: Level) {
     LOGGER.level.store(level_to_u8(level), Ordering::Relaxed);
 }
 
 /// Retorna o nível de log atual
+#[allow(dead_code)]
 pub fn get_level() -> Level {
     u8_to_level(LOGGER.level.load(Ordering::Relaxed))
 }
 
 /// Inicializa o logger baseado na presença de #[windows_subsystem = "windows"]
 /// e/ou flag de console
+#[allow(dead_code)]
 pub fn initialize(force_console: bool) {
     // Detecção de ambiente GUI/console
     let is_gui_mode = std::env::var("RUST_LOG").is_err() && !force_console;
@@ -118,6 +123,7 @@ pub fn initialize(force_console: bool) {
 }
 
 /// Escreve um log no arquivo de log (pode ser usado mesmo quando o console está desabilitado)
+#[allow(dead_code)]
 pub fn log_to_file(level: Level, message: &str) -> std::io::Result<()> {
     use std::fs::OpenOptions;
     use std::io::Write;

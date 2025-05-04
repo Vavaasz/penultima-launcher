@@ -2,6 +2,7 @@
 #[derive(Debug)]
 pub enum LauncherMessage {
     LaunchGame,
+    #[allow(dead_code)]
     CheckForUpdates,
     UpdateAvailable(String),
     DownloadComplete,

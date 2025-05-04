@@ -3,10 +3,10 @@ use crate::window_manager::WindowManager;
 use anyhow::{Context, Result};
 use eframe::egui::IconData;
 use image;
+use log::info;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use log::info;
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuId, MenuItemBuilder},
     Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
@@ -32,7 +32,7 @@ impl TrayManager {
         info!("Criando ícone na bandeja...");
 
         // Carregar o ícone
-        let icon = include_bytes!("../assets/icon.ico");
+        let icon = include_bytes!("../assets/ultima-logo.ico");
         let (icon_rgba, icon_width, icon_height) = {
             let image = image::load_from_memory(icon)
                 .context("Falha ao carregar ícone")?
@@ -72,7 +72,7 @@ impl TrayManager {
             .context("Falha ao adicionar item Sair")?;
 
         let tray_icon = TrayIconBuilder::new()
-            .with_tooltip("ArcadiaOT Launcher")
+            .with_tooltip("UltimaOT Launcher")
             .with_icon(icon)
             .with_menu(Box::new(tray_menu))
             .build()
@@ -104,7 +104,7 @@ impl TrayManager {
                 window_state: window_state_menu.clone(),
                 needs_repaint: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             };
-            
+
             while let Ok(event) = menu_channel.recv() {
                 if event.id == restore_id {
                     info!("Menu Abrir clicado!");
@@ -152,7 +152,7 @@ impl TrayManager {
 
     // Função para carregar o ícone do aplicativo para a janela
     pub fn load_window_icon() -> Option<Arc<IconData>> {
-        let icon = include_bytes!("../assets/icon.ico");
+        let icon = include_bytes!("../assets/ultima-logo.ico");
         let (icon_rgba, icon_width, icon_height) = {
             let image = image::load_from_memory(icon).ok()?;
             let image = image.into_rgba8();

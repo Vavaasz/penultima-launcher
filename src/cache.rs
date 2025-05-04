@@ -1,13 +1,13 @@
 use crate::tokio::sync::mpsc;
 use crate::LauncherMessage;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use log::info;
+use serde::{Deserialize, Serialize};
+use serde_json;
 use std::fs;
 use std::path::PathBuf;
 use tokio;
 use tokio::time::Duration;
-use serde::{Deserialize, Serialize};
-use serde_json;
 
 /// Estrutura para gerenciar as operações de cache do launcher
 pub struct CacheManager {
@@ -76,7 +76,7 @@ impl CacheManager {
         ));
 
         // Verificar e limpar o diretório de cache personalizado dentro da pasta do jogo
-        let custom_cache_path = self.game_path.join("ArcadiaOT").join("cache");
+        let custom_cache_path = self.game_path.join("UltimaOT").join("cache");
         let custom_size =
             self.clean_directory(&custom_cache_path, "cache personalizado", &message_sender)?;
         total_cleaned_mb += custom_size;
