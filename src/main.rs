@@ -6,12 +6,22 @@ use clap::Parser;
 use eframe::egui;
 use image;
 use log::{info, warn};
-use std::fs::{self};
+use regex::Regex;
+use std::ffi::c_void;
+use std::fs::{self, File};
+use std::io::{BufReader, Read};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio;
+use windows::{
+    core::PCWSTR,
+    Win32::Storage::FileSystem::{
+        GetFileVersionInfoW, GetFileVersionInfoSizeW, VerQueryValueW, VS_FIXEDFILEINFO,
+    },
+};
+use windows::core::w;
 
 mod app_dirs;
 mod cache;
@@ -66,6 +76,10 @@ struct GameLauncher {
     show_force_update_modal: bool, // Nova variável para controlar a visibilidade do modal de confirmação
     disable_auto_start: bool,      // Nova variável para controlar o início automático
     config_modal: Option<ConfigModal>, // Novo campo para o modal de configuração
+    is_hidden_by_manager: bool, // Nova flag para controlar se a janela foi escondida pelo WindowManager
+    tray_manager: Option<TrayManager>, // Gerenciador da bandeja do sistema
+    launcher_version: String,  // Nova variável para armazenar a versão do launcher
+    client_version: Option<String>, // Nova variável para armazenar a versão do client.exe
 }
 
 impl Default for GameLauncher {
@@ -96,8 +110,8 @@ impl Default for GameLauncher {
         let mut launcher = Self {
             status: "Verificando atualizações...".to_string(),
             progress: 0.0,
-            download_path,
-            game_path,
+            download_path: download_path.clone(),
+            game_path: game_path.clone(),
             current_version: None,
             update_sender: None,
             message_receiver: None,
@@ -108,7 +122,7 @@ impl Default for GameLauncher {
             window_state: Arc::new(Mutex::new(WindowState::default())),
             needs_repaint: Arc::new(AtomicBool::new(false)),
             initialized: false,
-            auto_hide: false, // Por padrão, o launcher não se esconde
+            auto_hide: true, // Por padrão, o launcher agora se esconde
             proxy_status: ProxyStatus::new(), // Usar o construtor explícito
             temp_message_time: None,
             is_alert_message: false,
@@ -120,7 +134,14 @@ impl Default for GameLauncher {
             show_force_update_modal: false, // Modal de confirmação desabilitado por padrão
             disable_auto_start,
             config_modal: None, // Inicializar o modal de configuração como None
+            is_hidden_by_manager: false, // Nova flag para controlar se a janela foi escondida pelo WindowManager
+            tray_manager: None, // Inicializar o tray_manager como None
+            launcher_version: env!("CARGO_PKG_VERSION").to_string(), // Versão do launcher do Cargo.toml
+            client_version: None,
         };
+        
+        // Carregar versão do client.exe
+        launcher.load_client_version();
 
         if let Ok(version) = updates::UpdateManager::load_current_version(&launcher.game_path) {
             launcher.current_version = Some(version);
@@ -131,6 +152,73 @@ impl Default for GameLauncher {
 }
 
 impl GameLauncher {
+
+    /// Carrega a versão do client.exe
+    fn load_client_version(&mut self) {
+        let app_dirs = AppDirs {
+            base_dir: PathBuf::new(),
+            download_path: self.download_path.clone(),
+            game_path: self.game_path.clone()
+        };
+
+        let client_paths = app_dirs.find_client_paths();
+        if let Some(client_path) = client_paths.first() {
+            self.client_version = Self::get_file_version(client_path);
+        }
+    }
+
+    /// Obtém a versão do Tibia Client lendo diretamente do binário
+    fn get_file_version(file_path: &std::path::Path) -> Option<String> {
+        // Ler o arquivo binário
+        let file = File::open(file_path).ok()?;
+        let mut reader = BufReader::new(file);
+        let mut buffer = Vec::new();
+        
+        // Ler todo o conteúdo do arquivo
+        reader.read_to_end(&mut buffer).ok()?;
+        
+        // Converter para string (ignorando caracteres inválidos)
+        let content = String::from_utf8_lossy(&buffer);
+        
+        // Procurar por "Tibia Client"
+        if let Some(pos) = content.find("Tibia Client") {
+            // Procurar por padrão de versão após "Tibia Client"
+            let search_area = &content[pos..std::cmp::min(pos + 200, content.len())];
+            
+            // Regex para encontrar versão no formato X.X.X ou X.XX
+            if let Ok(version_regex) = Regex::new(r"\b(\d+\.\d+(?:\.\d+)?)\b") {
+                if let Some(captures) = version_regex.find(search_area) {
+                    return Some(captures.as_str().to_string());
+                }
+            }
+            
+            // Fallback: procurar por números após "Tibia Client"
+            if let Ok(numbers_regex) = Regex::new(r"\b(\d{1,2}\.\d{1,2})\b") {
+                if let Some(captures) = numbers_regex.find(search_area) {
+                    return Some(captures.as_str().to_string());
+                }
+            }
+        }
+        
+        // Se não encontrar "Tibia Client", tentar procurar por padrões de versão comuns
+        let version_patterns = [
+            r"Version\s+(\d+\.\d+(?:\.\d+)?)",
+            r"v(\d+\.\d+(?:\.\d+)?)",
+            r"(\d+\.\d{2})",
+        ];
+        
+        for pattern in &version_patterns {
+            if let Ok(regex) = Regex::new(pattern) {
+                if let Some(captures) = regex.captures(&content) {
+                    if let Some(version) = captures.get(1) {
+                        return Some(version.as_str().to_string());
+                    }
+                }
+            }
+        }
+        
+        None
+    }
     fn setup_update_channel(&mut self) {
         let (update_tx, mut update_rx) = mpsc::unbounded_channel();
         let (message_tx, message_rx) = mpsc::unbounded_channel();
@@ -819,20 +907,77 @@ impl GameLauncher {
                     );
                 }
 
-                ui.vertical_centered(|ui| {
-                    // Título com estilo - substituído pelo logo
-                    ui.add_space(35.0);
-
-                    if let Some(logo) = &self.logo_texture {
-                        // Tamanho fixo para o logo
-                        let final_size = egui::vec2(215.0, 150.0);
-
-                        ui.add(egui::Image::new(egui::ImageSource::Texture(
-                            egui::load::SizedTexture::new(logo.id(), final_size),
-                        )));
-                    }
-
+                // Painel superior com informações de versão no canto superior esquerdo
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
                     ui.add_space(10.0);
+                    ui.vertical(|ui| {
+                        ui.add_space(10.0);
+                        
+                        // Versão do Launcher
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(format!("Launcher v{}", self.launcher_version))
+                                    .size(12.0)
+                                    .color(egui::Color32::from_rgba_unmultiplied(200, 200, 200, 180)),
+                            )
+                        );
+                        
+                        // Versão do Game (version.txt)
+                        if let Some(version) = &self.current_version {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(format!("Game v{}", version))
+                                        .size(12.0)
+                                        .color(egui::Color32::from_rgba_unmultiplied(200, 200, 200, 180)),
+                                )
+                            );
+                        } else {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new("Game: não instalado")
+                                        .size(12.0)
+                                        .color(egui::Color32::from_rgba_unmultiplied(200, 200, 200, 180)),
+                                )
+                            );
+                        }
+                        
+                        // Versão do Client (client.exe)
+                        if let Some(client_ver) = &self.client_version {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(format!("Client v{}", client_ver))
+                                        .size(12.0)
+                                        .color(egui::Color32::from_rgba_unmultiplied(200, 200, 200, 180)),
+                                )
+                            );
+                        } else {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new("Client: não encontrado")
+                                        .size(12.0)
+                                        .color(egui::Color32::from_rgba_unmultiplied(200, 200, 200, 180)),
+                                )
+                            );
+                        }
+                    });
+                });
+            });
+
+            ui.vertical_centered(|ui| {
+                // Título com estilo - substituído pelo logo
+                ui.add_space(35.0);
+
+                if let Some(logo) = &self.logo_texture {
+                    // Tamanho fixo para o logo
+                    let final_size = egui::vec2(215.0, 150.0);
+
+                    ui.add(egui::Image::new(egui::ImageSource::Texture(
+                        egui::load::SizedTexture::new(logo.id(), final_size),
+                    )));
+                }
+
+                ui.add_space(10.0);
 
                     // Indicador de carregamento ou status
                     if self.is_processing
@@ -1158,17 +1303,44 @@ impl GameLauncher {
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            // Versão do Launcher
+                            ui.label(
+                                egui::RichText::new(format!("Launcher v{}", self.launcher_version))
+                                    .color(egui::Color32::from_rgb(180, 180, 180))
+                                    .size(12.0),
+                            );
+                            
+                            ui.add_space(15.0);
+                            
+                            // Versão do version.txt
                             if let Some(version) = &self.current_version {
                                 ui.label(
-                                    egui::RichText::new(format!("Versão {}", version))
+                                    egui::RichText::new(format!("Game v{}", version))
                                         .color(egui::Color32::from_rgb(180, 180, 180))
-                                        .size(14.0),
+                                        .size(12.0),
                                 );
                             } else {
                                 ui.label(
-                                    egui::RichText::new("Versão não instalada")
+                                    egui::RichText::new("Game: não instalado")
                                         .color(egui::Color32::from_rgb(180, 180, 180))
-                                        .size(14.0),
+                                        .size(12.0),
+                                );
+                            }
+                            
+                            ui.add_space(15.0);
+                            
+                            // Versão do client.exe
+                            if let Some(client_ver) = &self.client_version {
+                                ui.label(
+                                    egui::RichText::new(format!("Client v{}", client_ver))
+                                        .color(egui::Color32::from_rgb(180, 180, 180))
+                                        .size(12.0),
+                                );
+                            } else {
+                                ui.label(
+                                    egui::RichText::new("Client: não encontrado")
+                                        .color(egui::Color32::from_rgb(180, 180, 180))
+                                        .size(12.0),
                                 );
                             }
                         });
@@ -1307,7 +1479,7 @@ async fn main() -> Result<()> {
             let mut launcher = GameLauncher::default();
             launcher.window_state = window_state;
             launcher.initialized = false;
-            launcher.auto_hide = args.auto_hide; // Define auto_hide baseado no argumento de linha de comando
+            // launcher.auto_hide = args.auto_hide; // Define auto_hide baseado no argumento de linha de comando
                                                  // let config_clone = config.clone();
                                                  // launcher.proxy_status.update_status(&config_clone);
             launcher.window_manager = Some(window_manager);

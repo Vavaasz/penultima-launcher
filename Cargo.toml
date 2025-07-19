@@ -1,13 +1,13 @@
 [package]
-name = "arcadia-launcher"
+name = "ultima-launcher"
 version = "0.1.0"
 edition = "2024"
 
 # Configuração para recursos do Windows
 [package.metadata.winres]
-OriginalFilename = "arcadia-launcher.exe"
-FileDescription = "Arcadia Launcher"
-ProductName = "Arcadia Launcher"
+OriginalFilename = "ultima-launcher.exe"
+FileDescription = "Ultima Launcher"
+ProductName = "Ultima Launcher"
 ProductVersion = "1.0.0"
 LegalCopyright = "Copyright 2025"
 
@@ -30,14 +30,14 @@ panic = "abort" # Abortar em caso de pânico para reduzir o tamanho do binário
 incremental = false # Sem compilação incremental para otimização máxima
 
 [dependencies]
-tokio = { version = "1.44.2", features = ["full"] }
+tokio = { version = "1.45", features = ["full"] }
 eframe = { version = "0.31.1", features = ["default_fonts", "persistence"] }
 egui = "0.31.1"
 reqwest = { version = "0.12.15", features = ["json", "stream"] }
 anyhow = "1.0.98"
 winapi = { version = "0.3.9", features = ["winuser", "windef", "processthreadsapi", "memoryapi", "consoleapi"] }
-windows = { version = "0.61.1", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp"] }
-zip = "2.6.1"
+windows = { version = "0.61.1", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_Storage_FileSystem"] }
+zip = "4.0.0"
 futures-util = "0.3.31"
 semver = "1.0.26"
 log = "0.4.27"
@@ -47,17 +47,18 @@ image = "0.25.6"
 native-tls = "0.2.14"
 tokio-native-tls = "0.3.1"
 single-instance = "0.3.3"
-clap = { version = "4.5.37", features = ["derive"] }
+clap = { version = "4.5.38", features = ["derive"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 chrono = "0.4.41"
 dirs = "6.0.0"
+regex = "1.11.1"
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
 
 # Configuração específica para crate principal
-[profile.release.package.arcadia-launcher]
+[profile.release.package.ultima-launcher]
 opt-level = 3 # Garantir otimização máxima para o binário principal
 
 # Melhorar otimização de dependências
