@@ -108,6 +108,7 @@ impl WindowManager {
         eframe::NativeOptions {
             persist_window: false,
             centered: true, // Isto já está correto
+            vsync: false,
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([800.0, 450.0])
                 .with_visible(true)

@@ -142,6 +142,59 @@ impl UpdateManager {
             info!("Diretório de personagens não encontrado em: {:?}", char_data_dir);
         }
 
+        // 4. Backup do diretório minimap
+        let minimap_dir = self.game_path.join("UltimaOT").join("minimap");
+        info!("Verificando diretório de minimap: {:?}", minimap_dir);
+
+        if minimap_dir.exists() {
+            info!("Diretório de minimap encontrado, fazendo backup...");
+            let backup_minimap_dir = backup_dir.join("minimap");
+
+            if backup_minimap_dir.exists() {
+                info!("Removendo diretório de backup antigo: {:?}", backup_minimap_dir);
+                fs::remove_dir_all(&backup_minimap_dir)?;
+            }
+
+            fs::create_dir_all(&backup_minimap_dir)?;
+
+            // Copiar todo o conteúdo do diretório minimap
+            match fs::read_dir(&minimap_dir) {
+                Ok(entries) => {
+                    for entry_result in entries {
+                        match entry_result {
+                            Ok(entry) => {
+                                let path = entry.path();
+                                if path.is_file() {
+                                    let file_name = path.file_name().unwrap();
+                                    let target_path = backup_minimap_dir.join(file_name);
+
+                                    info!("Copiando {:?} para {:?}", path, target_path);
+
+                                    match fs::copy(&path, &target_path) {
+                                        Ok(bytes) => info!("Arquivo copiado: {} bytes", bytes),
+                                        Err(e) => {
+                                            info!("Erro ao copiar arquivo {:?}: {}", path, e);
+                                            // Continue mesmo com erro em um arquivo
+                                        }
+                                    }
+                                }
+                            },
+                            Err(e) => {
+                                info!("Erro ao ler entrada do diretório: {}", e);
+                            }
+                        }
+                    }
+                    info!("Backup de diretório de minimap concluído");
+                },
+                Err(e) => {
+                    info!("Erro ao ler diretório de minimap: {}", e);
+                    // Continuar mesmo em caso de erro
+                }
+            }
+        } else {
+            info!("Diretório de minimap não encontrado em: {:?}", minimap_dir);
+        }
+
         info!("Processo de backup concluído com sucesso");
         Ok(())
     }
@@ -242,6 +295,59 @@ impl UpdateManager {
             }
         } else {
             info!("Backup de diretório de personagens não encontrado");
+        }
+
+        // 4. Restaurar diretório minimap (preservando novos arquivos)
+        let backup_minimap_dir = backup_dir.join("minimap");
+        info!("Verificando backup de minimap: {:?}", backup_minimap_dir);
+
+        if backup_minimap_dir.exists() {
+            let minimap_dir = self.game_path.join("UltimaOT").join("minimap");
+            info!("Verificando diretório de minimap: {:?}", minimap_dir);
+            
+            // Criar diretório se não existir
+            fs::create_dir_all(&minimap_dir)?;
+
+            // Copiar arquivos do backup sobre os novos (preserva novos arquivos, sobrescreve existentes)
+            match fs::read_dir(&backup_minimap_dir) {
+                Ok(entries) => {
+                    for entry_result in entries {
+                        match entry_result {
+                            Ok(entry) => {
+                                let path = entry.path();
+                                if path.is_file() {
+                                    let file_name = path.file_name().unwrap();
+                                    let target_path = minimap_dir.join(file_name);
+
+                                    if target_path.exists() {
+                                        info!("Sobrescrevendo arquivo existente: {:?}", target_path);
+                                    } else {
+                                        info!("Restaurando arquivo: {:?}", target_path);
+                                    }
+
+                                    match fs::copy(&path, &target_path) {
+                                        Ok(bytes) => info!("Arquivo processado: {} bytes", bytes),
+                                        Err(e) => {
+                                            info!("Erro ao processar arquivo {:?}: {}", path, e);
+                                            // Continue mesmo com erro em um arquivo
+                                        }
+                                    }
+                                }
+                            },
+                            Err(e) => {
+                                info!("Erro ao ler entrada do diretório de backup: {}", e);
+                            }
+                        }
+                    }
+                    info!("Restauração de diretório de minimap concluída (novos arquivos preservados)");
+                },
+                Err(e) => {
+                    info!("Erro ao ler diretório de backup de minimap: {}", e);
+                    // Continuar mesmo em caso de erro
+                }
+            }
+        } else {
+            info!("Backup de diretório de minimap não encontrado - mantendo arquivos da nova versão");
         }
 
         info!("Processo de restauração concluído com sucesso");
