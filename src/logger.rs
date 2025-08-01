@@ -1,5 +1,6 @@
 use log::{Level, LevelFilter, Metadata, Record, SetLoggerError};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use crate::constants::*;
 
 // Um logger personalizado que pode ser ativado ou desativado
 pub struct AppLogger {
@@ -130,7 +131,7 @@ pub fn log_to_file(level: Level, message: &str) -> std::io::Result<()> {
 
     let app_dirs = crate::app_dirs::AppDirs::init().ok();
     if let Some(dirs) = app_dirs {
-        let log_path = dirs.game_path.join("launcher.log");
+        let log_path = dirs.game_path.join(LOG_FILENAME);
 
         let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
         let log_entry = format!("[{}] {} {}\n", timestamp, level, message);

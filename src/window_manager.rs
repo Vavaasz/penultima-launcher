@@ -1,3 +1,4 @@
+use crate::constants::*;
 use crate::game_client::WindowState;
 use eframe::egui;
 use egui::IconData;
@@ -8,7 +9,7 @@ use std::time::Instant;
 use log::info;
 use winapi::um::winuser::{
     FindWindowW, SetForegroundWindow, SetWindowPos, ShowWindow, HWND_NOTOPMOST, HWND_TOPMOST,
-    SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_RESTORE, SW_SHOW,
+    SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_RESTORE, SW_SHOW, IsWindowVisible, IsIconic,
 };
 
 pub struct WindowManager {
@@ -49,29 +50,39 @@ impl WindowManager {
             use std::os::windows::ffi::OsStrExt;
             use std::ptr::null_mut;
 
-            let title: Vec<u16> = OsStr::new("UltimaOT Launcher")
+            let title: Vec<u16> = OsStr::new(APP_NAME)
                 .encode_wide()
                 .chain(Some(0))
                 .collect();
 
             let hwnd = FindWindowW(null_mut(), title.as_ptr());
             if !hwnd.is_null() {
-                info!("Janela encontrada, restaurando...");
+                // Verifica se a janela já está visível e não está minimizada
+                let is_visible = IsWindowVisible(hwnd) != 0;
+                let is_minimized = IsIconic(hwnd) != 0;
+                
+                // Só executa a restauração se a janela estiver invisível ou minimizada
+                if !is_visible || is_minimized {
+                    info!("Janela encontrada, restaurando...");
 
-                // Traz a janela para frente
-                SetForegroundWindow(hwnd);
-                SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
-                SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
-                ShowWindow(hwnd, SW_RESTORE);
-                ShowWindow(hwnd, SW_SHOW);
+                    // Traz a janela para frente
+                    SetForegroundWindow(hwnd);
+                    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+                    SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+                    ShowWindow(hwnd, SW_RESTORE);
+                    ShowWindow(hwnd, SW_SHOW);
 
-                // Atualiza o estado
-                let mut state = self.window_state.lock().unwrap();
-                state.visible = true;
-                state.last_show = Instant::now();
+                    // Atualiza o estado
+                    let mut state = self.window_state.lock().unwrap();
+                    state.visible = true;
+                    state.last_show = Instant::now();
 
-                // Solicita repintura da UI
-                self.needs_repaint.store(true, Ordering::SeqCst);
+                    // Solicita repintura da UI
+                    self.needs_repaint.store(true, Ordering::SeqCst);
+                } else {
+                    // Janela já está visível, apenas traz para frente sem logs desnecessários
+                    SetForegroundWindow(hwnd);
+                }
             } else {
                 info!("Janela não encontrada!");
             }
@@ -85,7 +96,7 @@ impl WindowManager {
             use std::os::windows::ffi::OsStrExt;
             use std::ptr::null_mut;
 
-            let title: Vec<u16> = OsStr::new("UltimaOT Launcher")
+            let title: Vec<u16> = OsStr::new(APP_NAME)
                 .encode_wide()
                 .chain(Some(0))
                 .collect();
@@ -110,12 +121,12 @@ impl WindowManager {
             centered: true, // Isto já está correto
             vsync: false,
             viewport: egui::ViewportBuilder::default()
-                .with_inner_size([800.0, 450.0])
+                .with_inner_size([WINDOW_SIZE.0, WINDOW_SIZE.1])
                 .with_visible(true)
                 .with_resizable(false)
                 .with_maximized(false)
                 .with_maximize_button(false)
-                .with_title("UltimaOT Launcher")
+                .with_title(APP_NAME)
                 .with_decorations(true)
                 .with_transparent(false)
                 .with_active(true)

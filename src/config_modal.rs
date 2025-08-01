@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use crate::constants::*;
 use eframe::egui;
 use log::info;
 use serde::{Deserialize, Serialize};
@@ -8,9 +9,9 @@ use std::sync::{Arc, Mutex};
 
 // Opções predefinidas de servidores
 const SERVIDORES_PREDEFINIDOS: [&str; 3] = [
-    "https://login.arcadiaot.com.br:8443/login",
-    "http://127.0.0.0:8080/login",
-    "http://127.0.0.0/login",
+    PREDEFINED_LOGIN_URL_HTTPS,
+    PREDEFINED_LOGIN_URL_HTTP_8080,
+    PREDEFINED_LOGIN_URL_HTTP,
 ];
 
 // Estrutura para representar as configurações do jogo

@@ -1,3 +1,4 @@
+use crate::constants::*;
 use crate::game_client::WindowState;
 use crate::window_manager::WindowManager;
 use anyhow::{Context, Result};
@@ -72,7 +73,7 @@ impl TrayManager {
             .context("Falha ao adicionar item Sair")?;
 
         let tray_icon = TrayIconBuilder::new()
-            .with_tooltip("UltimaOT Launcher")
+            .with_tooltip(APP_NAME)
             .with_icon(icon)
             .with_menu(Box::new(tray_menu))
             .build()

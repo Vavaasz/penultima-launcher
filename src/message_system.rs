@@ -8,8 +8,10 @@ pub enum LauncherMessage {
     DownloadComplete,
     DownloadProgress(f32),
     VersionUpdated(String),
+    ClientVersionUpdated(String),
     SetStatus(String),
     SetProcessing(bool),
     Error(String),
     SetTempMessage(String),
+    PingResult(Option<u32>), // Resultado do ping do servidor
 }

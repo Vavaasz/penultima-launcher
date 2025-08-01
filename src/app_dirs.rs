@@ -3,6 +3,7 @@ use log::{error, info};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use crate::constants::*;
 
 /// Estrutura para gerenciar os diretórios da aplicação
 pub struct AppDirs {
@@ -18,13 +19,13 @@ impl AppDirs {
         // Obter %APPDATA% no Windows onde o egui cria a pasta "ArcadiaOT Launcher"
         match env::var("APPDATA") {
             Ok(appdata) => {
-                let base_dir = Path::new(&appdata).join("UltimaOT Launcher");
+                let base_dir = Path::new(&appdata).join(APP_DATA_DIR);
                 Some(base_dir)
             }
             Err(_) => {
                 // Fallback para outros sistemas operacionais
                 if let Some(home) = dirs::home_dir() {
-                    let base_dir = home.join(".ultimaot-launcher");
+                    let base_dir = home.join(HOME_DIR);
                     Some(base_dir)
                 } else {
                     None

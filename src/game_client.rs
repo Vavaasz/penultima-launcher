@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use log::info;
 use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+use crate::constants::*;
 
 // Estrutura para rastrear o estado da janela
 pub struct WindowState {
@@ -188,29 +189,39 @@ pub fn show_window(window_state: &Arc<Mutex<WindowState>>) {
         use std::ptr::null_mut;
         use winapi::um::winuser::{
             FindWindowW, SetForegroundWindow, SetWindowPos, ShowWindow, HWND_NOTOPMOST,
-            HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SW_RESTORE, SW_SHOW,
+            HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SW_RESTORE, SW_SHOW, IsWindowVisible, IsIconic,
         };
 
-        let title: Vec<u16> = OsStr::new("UltimaOT Launcher")
+        let title: Vec<u16> = OsStr::new(APP_NAME)
             .encode_wide()
             .chain(Some(0))
             .collect();
 
         let hwnd = FindWindowW(null_mut(), title.as_ptr());
         if !hwnd.is_null() {
-            info!("Janela encontrada, restaurando...");
+            // Verifica se a janela já está visível e não está minimizada
+            let is_visible = IsWindowVisible(hwnd) != 0;
+            let is_minimized = IsIconic(hwnd) != 0;
+            
+            // Só executa a restauração se a janela estiver invisível ou minimizada
+            if !is_visible || is_minimized {
+                info!("Janela encontrada, restaurando...");
 
-            // Traz a janela para frente
-            SetForegroundWindow(hwnd);
-            SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
-            SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
-            ShowWindow(hwnd, SW_RESTORE);
-            ShowWindow(hwnd, SW_SHOW);
+                // Traz a janela para frente
+                SetForegroundWindow(hwnd);
+                SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+                SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+                ShowWindow(hwnd, SW_RESTORE);
+                ShowWindow(hwnd, SW_SHOW);
 
-            // Atualiza o estado
-            let mut state = window_state.lock().unwrap();
-            state.visible = true;
-            state.last_show = Instant::now();
+                // Atualiza o estado
+                let mut state = window_state.lock().unwrap();
+                state.visible = true;
+                state.last_show = Instant::now();
+            } else {
+                // Janela já está visível, apenas traz para frente sem logs desnecessários
+                SetForegroundWindow(hwnd);
+            }
         } else {
             info!("Janela não encontrada!");
         }

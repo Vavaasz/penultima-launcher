@@ -1,4 +1,5 @@
 use anyhow::Result;
+use crate::constants::*;
 use log::{error, info, warn};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -10,9 +11,9 @@ use tokio::time::{sleep, timeout};
 use tokio_native_tls::TlsConnector as TokioTlsConnector;
 
 // Constantes de configuração
-const TIMEOUT_DURATION: Duration = Duration::from_secs(5); // Reduzido de 30 para 5 segundos
-const ACTIVITY_TIMEOUT: Duration = Duration::from_secs(15); // Reduzido de 60 para 10 segundos
-const READ_TIMEOUT: Duration = Duration::from_secs(5); // Novo timeout específico para leitura
+const TIMEOUT_DURATION: Duration = PROXY_TIMEOUT;
+const ACTIVITY_TIMEOUT: Duration = PROXY_ACTIVITY_TIMEOUT;
+const READ_TIMEOUT: Duration = PROXY_READ_TIMEOUT;
 
 /// Configuração do proxy com portas e hosts de destino.
 pub struct ProxyConfig {
@@ -27,12 +28,12 @@ pub struct ProxyConfig {
 impl Default for ProxyConfig {
     fn default() -> Self {
         Self {
-            login_port: 7171,
-            game_port: 7172,
-            http_port: 80,
-            https_port: 443,
-            game_host: "201.54.8.237".to_string(), // Exemplo de IP do servidor de jogo
-            web_host: "login.arcadiaot.com.br".to_string(), // Exemplo de host web
+            login_port: DEFAULT_LOGIN_PORT,
+            game_port: DEFAULT_GAME_PORT,
+            http_port: DEFAULT_HTTP_PORT,
+            https_port: DEFAULT_HTTPS_PORT,
+            game_host: GAME_SERVER_IP.to_string(),
+            web_host: WEB_LOGIN_HOST.to_string(),
         }
     }
 }

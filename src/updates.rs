@@ -1,4 +1,6 @@
+use crate::constants::*;
 use crate::tokio::sync::mpsc;
+use crate::client_version::ClientVersionManager;
 use crate::LauncherMessage;
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
@@ -10,7 +12,7 @@ use semver::Version;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::time::Duration;
+
 
 /// Estrutura para gerenciar as operações de atualização do jogo
 pub struct UpdateManager {
@@ -357,12 +359,12 @@ impl UpdateManager {
     /// Busca a versão mais recente no GitHub
     async fn fetch_github_version() -> Result<String> {
         info!("Iniciando verificação de versão no GitHub...");
-        let url = "https://raw.githubusercontent.com/vavasz/Ultima-Launcher/main/version.txt";
+        let url = GITHUB_VERSION_URL;
         info!("Conectando a: {}", url);
 
         // Criar um cliente com timeout
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
+            .timeout(HTTP_REQUEST_TIMEOUT)
             .build()?;
 
         // Fazer a requisição
@@ -435,6 +437,7 @@ impl UpdateManager {
     pub async fn check_for_updates(
         &self,
         message_sender: mpsc::UnboundedSender<LauncherMessage>,
+        disable_auto_start: bool,
     ) -> Result<()> {
         // Atualizar o status para indicar o início da verificação
         message_sender.send(LauncherMessage::SetStatus(
@@ -491,16 +494,14 @@ impl UpdateManager {
             message_sender.send(LauncherMessage::DownloadProgress(0.8))?;
 
             // Pequena pausa para que o usuário veja a mensagem
-            tokio::time::sleep(Duration::from_millis(1500)).await;
+            tokio::time::sleep(UI_MESSAGE_DISPLAY_DURATION).await;
 
             // Iniciar download
             self.download_release(
-                &format!(
-                    "https://github.com/vavasz/Ultima-Launcher/releases/download/{}/UltimaOT.zip",
-                    latest_version
-                ),
+                &get_github_download_url(&latest_version),
                 &latest_version,
                 message_sender.clone(),
+                disable_auto_start,
             ).await?;
         } else {
             info!("O jogo já está atualizado.");
@@ -511,7 +512,7 @@ impl UpdateManager {
             message_sender.send(LauncherMessage::DownloadProgress(1.0))?;
 
             // Pequena pausa para o usuário ver a mensagem
-            tokio::time::sleep(Duration::from_millis(1500)).await;
+            tokio::time::sleep(UI_MESSAGE_DISPLAY_DURATION).await;
 
             message_sender.send(LauncherMessage::SetStatus("Pronto para jogar".to_string()))?;
             message_sender.send(LauncherMessage::SetProcessing(false))?;
@@ -524,6 +525,7 @@ impl UpdateManager {
     pub async fn force_refresh(
         &self,
         message_sender: mpsc::UnboundedSender<LauncherMessage>,
+        disable_auto_start: bool,
     ) -> Result<()> {
         message_sender.send(LauncherMessage::SetStatus(
             "Fazendo backup dos arquivos importantes...".to_string(),
@@ -564,7 +566,37 @@ impl UpdateManager {
         ))?;
 
         // Chamar check_for_updates para baixar tudo novamente
-        let result = self.check_for_updates(message_sender.clone()).await;
+        let result = self.check_for_updates(message_sender.clone(), disable_auto_start).await;
+
+        // // Buscar versão mais recente do GitHub
+        // let latest_version = match Self::fetch_github_version().await {
+        //     Ok(version) => version,
+        //     Err(e) => {
+        //         info!("Erro ao buscar versão: {}", e);
+        //         message_sender.send(LauncherMessage::SetStatus(format!(
+        //             "Erro ao verificar versão: {}",
+        //             e
+        //         )))?;
+        //         message_sender.send(LauncherMessage::SetProcessing(false))?;
+        //         return Err(e.into());
+        //     }
+        // };
+
+        // message_sender.send(LauncherMessage::SetStatus(format!(
+        //     "Forçando download da versão: {}",
+        //     latest_version
+        // )))?;
+
+        // // Forçar download independentemente da versão local
+        // let result = self.download_release(
+        //     &format!(
+        //         "https://github.com/vavasz/Ultima-Launcher/releases/download/{}/UltimaOT.zip",
+        //         latest_version
+        //     ),
+        //     &latest_version,
+        //     message_sender.clone(),
+        //     disable_auto_start,
+        // ).await;
 
         // Restaurar arquivos importantes após a atualização
         message_sender.send(LauncherMessage::SetStatus(
@@ -595,6 +627,7 @@ impl UpdateManager {
         url: &str,
         version: &str,
         message_sender: mpsc::UnboundedSender<LauncherMessage>,
+        disable_auto_start: bool,
     ) -> Result<()> {
         message_sender.send(LauncherMessage::SetProcessing(true))?;
 
@@ -787,12 +820,23 @@ impl UpdateManager {
             .unwrap_or(false);
 
         if client_exe_exists {
+            // Obter a versão real do cliente baixado
+            if let Some(client_version) = ClientVersionManager::load_client_version(&self.download_path, &self.game_path) {
+                // Enviar a versão do cliente atualizada
+                message_sender.send(LauncherMessage::ClientVersionUpdated(client_version))?;
+            } else {
+                // Fallback para a versão do GitHub se não conseguir ler do cliente
+                message_sender.send(LauncherMessage::ClientVersionUpdated(version.to_string()))?;
+            }
+            
             message_sender.send(LauncherMessage::SetStatus(
                 "Atualização completa! Pronto para jogar.".to_string(),
             ))?;
 
-            // Iniciar automaticamente o jogo após a atualização bem-sucedida
-            message_sender.send(LauncherMessage::LaunchGame)?;
+            // Só iniciar automaticamente o jogo se disable_auto_start for false
+            if !disable_auto_start {
+                message_sender.send(LauncherMessage::LaunchGame)?;
+            }
         } else {
             message_sender.send(LauncherMessage::Error(
                 "Atualização concluída, mas client.exe não foi encontrado!".to_string(),

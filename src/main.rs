@@ -6,27 +6,19 @@ use clap::Parser;
 use eframe::egui;
 use image;
 use log::{info, warn};
-use regex::Regex;
-use std::ffi::c_void;
-use std::fs::{self, File};
-use std::io::{BufReader, Read};
+use std::fs::{self};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio;
-use windows::{
-    core::PCWSTR,
-    Win32::Storage::FileSystem::{
-        GetFileVersionInfoW, GetFileVersionInfoSizeW, VerQueryValueW, VS_FIXEDFILEINFO,
-    },
-};
-use windows::core::w;
 
 mod app_dirs;
 mod cache;
 mod cli;
+mod client_version;
 mod config_modal;
+mod constants;
 mod game_client;
 mod instance_manager;
 mod logger;
@@ -35,13 +27,16 @@ mod proxy;
 mod proxy_status;
 mod system;
 mod tray_manager;
+mod ui_components;
 mod updates;
 mod window_manager;
 
 // Importações diretas dos novos módulos
 use app_dirs::AppDirs;
 use cli::{show_console, Args};
+use client_version::ClientVersionManager;
 use config_modal::ConfigModal;
+use constants::*;
 use game_client::WindowState;
 use instance_manager::InstanceManager;
 use message_system::LauncherMessage;
@@ -76,10 +71,10 @@ struct GameLauncher {
     show_force_update_modal: bool, // Nova variável para controlar a visibilidade do modal de confirmação
     disable_auto_start: bool,      // Nova variável para controlar o início automático
     config_modal: Option<ConfigModal>, // Novo campo para o modal de configuração
-    is_hidden_by_manager: bool, // Nova flag para controlar se a janela foi escondida pelo WindowManager
-    tray_manager: Option<TrayManager>, // Gerenciador da bandeja do sistema
     launcher_version: String,  // Nova variável para armazenar a versão do launcher
     client_version: Option<String>, // Nova variável para armazenar a versão do client.exe
+    server_ping: Option<u32>, // Nova variável para armazenar o ping do servidor
+    last_ping_check: Option<Instant>, // Momento da última verificação de ping
 }
 
 impl Default for GameLauncher {
@@ -98,7 +93,7 @@ impl Default for GameLauncher {
         info!("Clientes disponíveis: {}", available_clients.len());
 
         // Criar GameClient com número máximo específico de clientes
-        let game_client = game_client::GameClient::new(3);
+        let game_client = game_client::GameClient::new(MAX_CLIENTS);
 
         // Carregar configurações do usuário
         let cache_manager = cache::CacheManager::new(download_path.clone(), game_path.clone());
@@ -134,10 +129,10 @@ impl Default for GameLauncher {
             show_force_update_modal: false, // Modal de confirmação desabilitado por padrão
             disable_auto_start,
             config_modal: None, // Inicializar o modal de configuração como None
-            is_hidden_by_manager: false, // Nova flag para controlar se a janela foi escondida pelo WindowManager
-            tray_manager: None, // Inicializar o tray_manager como None
             launcher_version: env!("CARGO_PKG_VERSION").to_string(), // Versão do launcher do Cargo.toml
             client_version: None,
+            server_ping: None, // Inicializar ping como None
+            last_ping_check: None, // Inicializar última verificação como None
         };
         
         // Carregar versão do client.exe
@@ -155,70 +150,107 @@ impl GameLauncher {
 
     /// Carrega a versão do client.exe
     fn load_client_version(&mut self) {
-        let app_dirs = AppDirs {
-            base_dir: PathBuf::new(),
-            download_path: self.download_path.clone(),
-            game_path: self.game_path.clone()
-        };
-
-        let client_paths = app_dirs.find_client_paths();
-        if let Some(client_path) = client_paths.first() {
-            self.client_version = Self::get_file_version(client_path);
-        }
+        self.client_version = ClientVersionManager::load_client_version(&self.download_path, &self.game_path);
     }
 
-    /// Obtém a versão do Tibia Client lendo diretamente do binário
-    fn get_file_version(file_path: &std::path::Path) -> Option<String> {
-        // Ler o arquivo binário
-        let file = File::open(file_path).ok()?;
-        let mut reader = BufReader::new(file);
-        let mut buffer = Vec::new();
+    /// Verifica o ping do servidor usando TCP customizado
+    fn check_server_ping(&mut self) {
+        let now = Instant::now();
         
-        // Ler todo o conteúdo do arquivo
-        reader.read_to_end(&mut buffer).ok()?;
+        // Se o message_sender não estiver disponível, não fazer ping ainda
+        if self.message_sender.is_none() {
+            return;
+        }
         
-        // Converter para string (ignorando caracteres inválidos)
-        let content = String::from_utf8_lossy(&buffer);
-        
-        // Procurar por "Tibia Client"
-        if let Some(pos) = content.find("Tibia Client") {
-            // Procurar por padrão de versão após "Tibia Client"
-            let search_area = &content[pos..std::cmp::min(pos + 200, content.len())];
-            
-            // Regex para encontrar versão no formato X.X.X ou X.XX
-            if let Ok(version_regex) = Regex::new(r"\b(\d+\.\d+(?:\.\d+)?)\b") {
-                if let Some(captures) = version_regex.find(search_area) {
-                    return Some(captures.as_str().to_string());
-                }
-            }
-            
-            // Fallback: procurar por números após "Tibia Client"
-            if let Ok(numbers_regex) = Regex::new(r"\b(\d{1,2}\.\d{1,2})\b") {
-                if let Some(captures) = numbers_regex.find(search_area) {
-                    return Some(captures.as_str().to_string());
-                }
+        // Verificar se já passou tempo suficiente desde a última verificação
+        // Para o primeiro ping (quando last_ping_check é None), executar imediatamente
+        if let Some(last_check) = self.last_ping_check {
+            if now.duration_since(last_check) < PING_CHECK_INTERVAL {
+                return;
             }
         }
         
-        // Se não encontrar "Tibia Client", tentar procurar por padrões de versão comuns
-        let version_patterns = [
-            r"Version\s+(\d+\.\d+(?:\.\d+)?)",
-            r"v(\d+\.\d+(?:\.\d+)?)",
-            r"(\d+\.\d{2})",
-        ];
+        // Atualizar o momento da última verificação
+        self.last_ping_check = Some(now);
         
-        for pattern in &version_patterns {
-            if let Ok(regex) = Regex::new(pattern) {
-                if let Some(captures) = regex.captures(&content) {
-                    if let Some(version) = captures.get(1) {
-                        return Some(version.as_str().to_string());
+        // Executar ping TCP customizado de forma não-bloqueante
+        if let Some(message_sender) = &self.message_sender {
+            let sender = message_sender.clone();
+            
+            tokio::spawn(async move {
+                let mut ping_times = Vec::new();
+                
+                // Fazer 4 pings para calcular a média
+                for _ in 0..4 {
+                    match Self::tcp_ping_server().await {
+                        Ok(duration) => {
+                            ping_times.push(duration);
+                        }
+                        Err(_) => {
+                            // Ignorar falhas individuais
+                        }
                     }
                 }
-            }
+                
+                // Calcular a média dos pings bem-sucedidos
+                let ping_result = if !ping_times.is_empty() {
+                    Some(ping_times.iter().sum::<u32>() / ping_times.len() as u32)
+                } else {
+                    None
+                };
+                
+                // Enviar resultado via canal de mensagens
+                let _ = sender.send(LauncherMessage::PingResult(ping_result));
+            });
+        }
+    }
+    
+    /// Cria um pacote TCP customizado seguindo o protocolo especificado
+    fn create_packet(command_text: &str) -> Vec<u8> {
+        let command = command_text.as_bytes();
+        let length = PING_PROTOCOL_SIZE + command.len(); // 2 = 255,255 do protocolo
+        
+        let mut packet = Vec::new();
+        packet.push(length as u8 & 0xff);
+        packet.push((length >> 8) as u8 & 0xff);
+        packet.push(255);
+        packet.push(255);
+        packet.extend_from_slice(command);
+        
+        packet
+    }
+    
+    /// Executa ping TCP customizado para o servidor
+    async fn tcp_ping_server() -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
+        use tokio::net::TcpStream;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        
+        let start = Instant::now();
+        
+        // Conectar ao servidor
+        let mut stream = TcpStream::connect(get_ping_server_address()).await?;
+        
+        // Criar pacote de ping
+        let packet = Self::create_packet("info");
+        
+        // Enviar pacote
+        stream.write_all(&packet).await?;
+        
+        // Ler resposta
+        let mut buffer = vec![0; NETWORK_BUFFER_SIZE];
+        let bytes_read = stream.read(&mut buffer).await?;
+        
+        let duration = start.elapsed().as_millis() as u32;
+        
+        // Apenas confirmar que houve resposta (não fazer parse do XML)
+        if bytes_read > 0 {
+            info!("Resposta recebida: {} bytes em {}ms", bytes_read, duration);
         }
         
-        None
+        Ok(duration)
     }
+
+
     fn setup_update_channel(&mut self) {
         let (update_tx, mut update_rx) = mpsc::unbounded_channel();
         let (message_tx, message_rx) = mpsc::unbounded_channel();
@@ -229,6 +261,7 @@ impl GameLauncher {
 
         let download_path = self.download_path.clone();
         let game_path = self.game_path.clone();
+        let disable_auto_start = self.disable_auto_start;
         let message_tx = message_tx.clone();
 
         tokio::spawn(async move {
@@ -236,7 +269,7 @@ impl GameLauncher {
                 // Criar instância do UpdateManager
                 let update_manager =
                     updates::UpdateManager::new(download_path.clone(), game_path.clone());
-                match update_manager.check_for_updates(message_tx.clone()).await {
+                match update_manager.check_for_updates(message_tx.clone(), disable_auto_start).await {
                     Ok(_) => (),
                     Err(e) => {
                         if let Err(send_err) =
@@ -323,6 +356,9 @@ impl GameLauncher {
     }
 
     fn custom_update(&mut self, ctx: &egui::Context) {
+        // Verificar ping do servidor periodicamente
+        self.check_server_ping();
+        
         // Definir o tamanho desejado da janela
         let desired_size = egui::Vec2::new(800.0, 450.0);
         if ctx.available_rect().size() != desired_size {
@@ -398,7 +434,7 @@ impl GameLauncher {
                                     let update_manager =
                                         updates::UpdateManager::new(download_path, game_path);
                                     if let Err(e) =
-                                        update_manager.check_for_updates(message_tx).await
+                                        update_manager.check_for_updates(message_tx, disable_auto_start).await
                                     {
                                         info!("Erro ao iniciar download automático: {}", e);
                                     }
@@ -648,6 +684,10 @@ impl GameLauncher {
                         LauncherMessage::VersionUpdated(version) => {
                             self.current_version = Some(version);
                         }
+                        LauncherMessage::ClientVersionUpdated(version) => {
+                            // Atualizar a versão do cliente na UI
+                            self.client_version = Some(version);
+                        }
                         LauncherMessage::SetStatus(status) => {
                             self.status = status;
                         }
@@ -668,6 +708,10 @@ impl GameLauncher {
                                 self.is_alert_message = false;
                             }
                             info!("Mensagem temporária definida via channel: {}", message);
+                        }
+                        LauncherMessage::PingResult(ping) => {
+                            self.server_ping = ping;
+                            self.last_ping_check = Some(Instant::now());
                         }
                     }
                 }
@@ -768,10 +812,11 @@ impl GameLauncher {
 
                                     let download_path = self.download_path.clone();
                                     let game_path = self.game_path.clone();
+                                    let disable_auto_start = self.disable_auto_start;
                                     let update_manager = updates::UpdateManager::new(download_path, game_path);
 
                                     tokio::spawn(async move {
-                                        match update_manager.force_refresh(tx.clone()).await {
+                                        match update_manager.force_refresh(tx.clone(), disable_auto_start).await {
                                             Ok(_) => {
                                                 info!("Atualização forçada concluída com sucesso");
                                             }
@@ -844,8 +889,8 @@ impl GameLauncher {
             // Redimensionar o logo para o tamanho exato desejado
             let resized_logo = image::imageops::resize(
                 &logo,
-                215,                                   // Largura exata
-                150,                                   // Altura exata
+                LOGO_SIZE.0 as u32,                   // Largura exata
+                LOGO_SIZE.1 as u32,                   // Altura exata
                 image::imageops::FilterType::Lanczos3, // Alta qualidade para o logo
             );
 
@@ -867,489 +912,8 @@ impl GameLauncher {
     }
 
     fn render_central_panel(&mut self, ctx: &egui::Context, available_size: egui::Vec2) {
-        let button_width = 200.0;
-        let button_height = 40.0;
-        let footer_height = if self.show_footer { 35.0 } else { 0.0 };
-
-        // Primeiro, renderize o conteúdo principal com um fundo preto sólido para evitar flash
-        egui::CentralPanel::default()
-            .frame(
-                egui::Frame::new()
-                    .fill(egui::Color32::from_rgb(0, 0, 0))
-                    .inner_margin(egui::Margin::ZERO)
-                    .outer_margin(egui::Margin::ZERO),
-            )
-            .show(ctx, |ui| {
-                // Cria um layout vertical geral com espaço para o rodapé
-                let main_content_height = ui.available_height() - footer_height;
-
-                // Área principal de conteúdo - removido o Frame adicional
-                ui.set_min_height(main_content_height);
-
-                // Renderizar o papel de parede se estiver carregado
-                if let Some(texture) = &self.background_texture {
-                    // Obter o tamanho disponível para o papel de parede
-                    let available_rect = ui.max_rect();
-
-                    // Desenhar a imagem cobrindo toda a área
-                    ui.painter().image(
-                        texture.id(),
-                        available_rect,
-                        egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1.0, 1.0)),
-                        egui::Color32::WHITE,
-                    );
-
-                    // Adicionar overlay escuro por cima da imagem
-                    ui.painter().rect_filled(
-                        available_rect,
-                        0.0,
-                        egui::Color32::from_black_alpha(153),
-                    );
-                }
-
-                // Painel superior com informações de versão no canto superior esquerdo
-            ui.horizontal(|ui| {
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
-                    ui.add_space(10.0);
-                    ui.vertical(|ui| {
-                        ui.add_space(10.0);
-                        
-                        // Versão do Launcher
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(format!("Launcher v{}", self.launcher_version))
-                                    .size(12.0)
-                                    .color(egui::Color32::from_rgba_unmultiplied(200, 200, 200, 180)),
-                            )
-                        );
-                        
-                        // Versão do Game (version.txt)
-                        if let Some(version) = &self.current_version {
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(format!("Game v{}", version))
-                                        .size(12.0)
-                                        .color(egui::Color32::from_rgba_unmultiplied(200, 200, 200, 180)),
-                                )
-                            );
-                        } else {
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new("Game: não instalado")
-                                        .size(12.0)
-                                        .color(egui::Color32::from_rgba_unmultiplied(200, 200, 200, 180)),
-                                )
-                            );
-                        }
-                        
-                        // Versão do Client (client.exe)
-                        if let Some(client_ver) = &self.client_version {
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(format!("Client v{}", client_ver))
-                                        .size(12.0)
-                                        .color(egui::Color32::from_rgba_unmultiplied(200, 200, 200, 180)),
-                                )
-                            );
-                        } else {
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new("Client: não encontrado")
-                                        .size(12.0)
-                                        .color(egui::Color32::from_rgba_unmultiplied(200, 200, 200, 180)),
-                                )
-                            );
-                        }
-                    });
-                });
-            });
-
-            ui.vertical_centered(|ui| {
-                // Título com estilo - substituído pelo logo
-                ui.add_space(35.0);
-
-                if let Some(logo) = &self.logo_texture {
-                    // Tamanho fixo para o logo
-                    let final_size = egui::vec2(215.0, 150.0);
-
-                    ui.add(egui::Image::new(egui::ImageSource::Texture(
-                        egui::load::SizedTexture::new(logo.id(), final_size),
-                    )));
-                }
-
-                ui.add_space(10.0);
-
-                    // Indicador de carregamento ou status
-                    if self.is_processing
-                        || !self.game_client.get_clients_count().1.eq(&0)
-                        || self.game_client.get_clients_count().0
-                        || self.temp_message_time.is_some()
-                    {
-                        // Reservar espaço para o indicador ou status
-                        let indicator_height = 45.0;
-                        let response =
-                            ui.allocate_space(egui::Vec2::new(available_size.x, indicator_height));
-                        let rect = response.1;
-                        let center = rect.center();
-
-                        // Mostrar animação apenas quando estiver processando ou com clientes ativos
-                        let (has_main, additional_count) = self.game_client.get_clients_count();
-                        if self.is_processing || has_main || additional_count > 0 {
-                            let time = ui.input(|i| i.time) as f32;
-                            let angle = (time * 2.0) % std::f32::consts::TAU;
-                            let radius = 30.0;
-
-                            // Desenhar círculo animado de pontos
-                            let num_points = 10;
-                            for i in 0..num_points {
-                                let point_angle =
-                                    angle + (i as f32 * std::f32::consts::TAU / num_points as f32);
-                                let x = center.x + radius * point_angle.cos();
-                                let y = center.y + radius * point_angle.sin();
-                                let point_pos = egui::Pos2::new(x, y);
-                                let point_size = 3.5_f32
-                                    + 3.0
-                                        * ((angle * 2.0 + i as f32 * 0.5) % std::f32::consts::TAU)
-                                            .sin();
-
-                                ui.painter().circle_filled(
-                                    point_pos,
-                                    point_size,
-                                    egui::Color32::ORANGE,
-                                );
-                            }
-
-                            // Solicitar repaint apenas se a animação estiver ativa
-                            if self.is_processing || has_main || additional_count > 0 {
-                                ctx.request_repaint_after(Duration::from_millis(50));
-                            }
-                        }
-
-                        ui.add_space(10.0);
-
-                        // Mensagem de status
-                        ui.allocate_ui_with_layout(
-                            egui::Vec2::new(rect.width(), 25.0),
-                            egui::Layout::centered_and_justified(egui::Direction::TopDown),
-                            |ui| {
-                                ui.label(
-                                    egui::RichText::new(&self.status)
-                                        .size(20.0)
-                                        .color(if self.is_alert_message {
-                                            egui::Color32::from_rgb(255, 100, 100)
-                                        // Vermelho para alertas
-                                        } else if self.temp_message_time.is_some() {
-                                            egui::Color32::from_rgb(100, 255, 100)
-                                        // Verde para sucesso
-                                        } else {
-                                            egui::Color32::from_rgb(220, 220, 220)
-                                            // Branco para normal
-                                        })
-                                        .strong(),
-                                );
-                            },
-                        );
-                    }
-
-                    // Espaço dinâmico para empurrar os botões para baixo quando não há indicador de carregamento
-                    let (has_main, additional_count) = self.game_client.get_clients_count();
-                    if !self.is_processing
-                        && additional_count == 0
-                        && !has_main
-                        && self.temp_message_time.is_none()
-                    {
-                        ui.add_space(available_size.y * 0.04);
-                    } else {
-                        ui.add_space(available_size.y * 0.01);
-                    }
-
-                    // Centralizar os botões manualmente
-                    let available_width = ui.available_width();
-                    let indent = (available_width - button_width) / 2.0;
-
-                    let is_game_running = self.is_game_running();
-                    let (_, has_additional_clients) = self.game_client.get_clients_count();
-                    let has_additional_clients = has_additional_clients > 0;
-
-                    if self.is_processing {
-                        // Não mostrar botões quando estiver processando
-                    } else if is_game_running || has_additional_clients {
-                        // Mostra APENAS o botão NOVO CLIENTE quando o jogo principal ou clientes adicionais estão rodando
-                        ui.horizontal(|ui| {
-                            ui.add_space(indent);
-                            let (_, additional_count) = self.game_client.get_clients_count();
-                            let max_clients = self.game_client.max_clients;
-                            let can_launch = additional_count < max_clients;
-
-                            if ui
-                                .add_sized(
-                                    [button_width, button_height],
-                                    egui::Button::new(
-                                        egui::RichText::new(format!(
-                                            "▶ Cliente Adicional ({}/{})",
-                                            additional_count, max_clients
-                                        ))
-                                        .size(15.0)
-                                        .color(
-                                            if can_launch {
-                                                if ui.ui_contains_pointer() {
-                                                    egui::Color32::BLACK
-                                                } else {
-                                                    egui::Color32::WHITE
-                                                }
-                                            } else {
-                                                egui::Color32::GRAY
-                                            },
-                                        ),
-                                    )
-                                    .fill(if can_launch {
-                                        if ui.ui_contains_pointer() {
-                                            egui::Color32::from_rgb(92, 200, 92)
-                                        } else {
-                                            egui::Color32::from_rgb(76, 175, 80)
-                                        }
-                                    } else {
-                                        egui::Color32::from_rgb(150, 150, 150)
-                                    })
-                                    .corner_radius(10.0)
-                                    .stroke(egui::Stroke::NONE),
-                                )
-                                .clicked()
-                                && can_launch
-                            {
-                                if let Err(e) = self.launch_client(ctx) {
-                                    self.status = format!("Erro ao iniciar o cliente: {}", e);
-                                }
-                            }
-                        });
-                    } else {
-                        // Quando não há clientes rodando, mostra todos os botões
-                        ui.horizontal(|ui| {
-                            ui.add_space(indent);
-                            if ui
-                                .add_sized(
-                                    [button_width, button_height],
-                                    egui::Button::new(
-                                        egui::RichText::new("▶ JOGAR").size(22.0).color(
-                                            if ui.ui_contains_pointer() {
-                                                egui::Color32::BLACK
-                                            } else {
-                                                egui::Color32::WHITE
-                                            },
-                                        ),
-                                    )
-                                    .fill(if ui.ui_contains_pointer() {
-                                        egui::Color32::from_rgb(92, 200, 92)
-                                    } else {
-                                        egui::Color32::from_rgb(76, 175, 80)
-                                    })
-                                    .corner_radius(10.0)
-                                    .stroke(egui::Stroke::NONE),
-                                )
-                                .clicked()
-                            {
-                                if let Err(e) = self.launch_game(ctx) {
-                                    self.status = format!("Erro ao iniciar o jogo: {}", e);
-                                }
-                            }
-                        });
-                    }
-
-                    // Espaço flexível para empurrar os botões para baixo
-                    let available_height = ui.available_height();
-                    ui.add_space(available_height - button_height - 1.0);
-
-                    // Container para os botões inferiores com layout específico
-                    // Verificar se há clientes rodando antes de mostrar os botões
-                    let (has_main, additional_count) = self.game_client.get_clients_count();
-                    if !has_main && additional_count == 0 && !self.is_processing {
-                        ui.horizontal(|ui| {
-                            // Botão Forçar Atualização (esquerda)
-                            ui.with_layout(
-                                egui::Layout::left_to_right(egui::Align::BOTTOM),
-                                |ui| {
-                                    ui.add_space(10.0);
-
-                                    if ui
-                                        .add_sized(
-                                            [130.0, 30.0],
-                                            egui::Button::new(
-                                                egui::RichText::new("Forçar Atualização")
-                                                    .size(14.0)
-                                                    .color(egui::Color32::from_rgba_unmultiplied(
-                                                        200, 200, 200, 180,
-                                                    )),
-                                            )
-                                            .fill(egui::Color32::from_rgba_unmultiplied(
-                                                40, 40, 40, 180,
-                                            ))
-                                            .corner_radius(4.0)
-                                            .stroke(egui::Stroke::NONE),
-                                        )
-                                        .clicked()
-                                    {
-                                        self.show_force_update_modal = true;
-                                    }
-                                },
-                            );
-
-                            // Espaço flexível antes do checkbox
-                            ui.add_space(ui.available_width() * 0.22);
-
-                            // Checkbox no centro
-                            let mut disable_auto_start = self.disable_auto_start;
-                            if ui
-                                .checkbox(
-                                    &mut disable_auto_start,
-                                    egui::RichText::new("Desativar início automático")
-                                        .color(egui::Color32::from_rgb(180, 180, 180))
-                                        .size(14.0),
-                                )
-                                .changed()
-                            {
-                                self.disable_auto_start = disable_auto_start;
-                                // Salvar a configuração quando alterada
-                                let settings = cache::UserSettings { disable_auto_start };
-                                if let Err(e) = cache::CacheManager::new(
-                                    self.download_path.clone(),
-                                    self.game_path.clone(),
-                                )
-                                .save_user_settings(&settings)
-                                {
-                                    info!("Erro ao salvar configurações: {}", e);
-                                }
-                            }
-
-                            // Espaço flexível depois do checkbox
-                            ui.add_space(ui.available_width() * 0.18);
-
-                            // Botão Limpar Cache (direita)
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::BOTTOM),
-                                |ui| {
-                                    ui.add_space(10.0);
-
-                                    if ui
-                                        .add_sized(
-                                            [130.0, 30.0],
-                                            egui::Button::new(
-                                                egui::RichText::new("Limpar Cache")
-                                                    .size(14.0)
-                                                    .color(egui::Color32::from_rgba_unmultiplied(
-                                                        200, 200, 200, 180,
-                                                    )),
-                                            )
-                                            .fill(egui::Color32::from_rgba_unmultiplied(
-                                                40, 40, 40, 180,
-                                            ))
-                                            .corner_radius(4.0)
-                                            .stroke(egui::Stroke::NONE),
-                                        )
-                                        .clicked()
-                                    {
-                                        let (tx, rx) = mpsc::unbounded_channel();
-                                        self.message_receiver = Some(rx);
-                                        self.status = "Limpando cache...".to_string();
-                                        self.is_processing = true;
-                                        self.progress = 0.0;
-                                        ctx.request_repaint();
-
-                                        let download_path = self.download_path.clone();
-                                        let game_path = self.game_path.clone();
-                                        let cache_manager =
-                                            cache::CacheManager::new(download_path, game_path);
-
-                                        tokio::spawn(async move {
-                                            match cache_manager.clean_cache(tx.clone()).await {
-                                                Ok(size_mb) => {
-                                                    info!("Limpeza de cache concluída com sucesso");
-                                                    let _ = tx.send(
-                                                        LauncherMessage::SetTempMessage(format!(
-                                                    "Cache limpo com sucesso! ({:.2} MB liberados)",
-                                                    size_mb
-                                                )),
-                                                    );
-                                                }
-                                                Err(e) => {
-                                                    info!("Erro durante limpeza de cache: {}", e);
-                                                    let _ = tx.send(LauncherMessage::SetStatus(
-                                                        format!("Erro ao limpar cache: {}", e),
-                                                    ));
-                                                    let _ = tx.send(
-                                                        LauncherMessage::SetProcessing(false),
-                                                    );
-                                                }
-                                            }
-                                        });
-                                    }
-                                },
-                            );
-                        });
-                    }
-                });
-            });
-
-        // Renderizar o rodapé apenas se show_footer for true
-        if self.show_footer {
-            egui::TopBottomPanel::bottom("footer_panel")
-                .exact_height(footer_height)
-                .frame(
-                    egui::Frame::new()
-                        .fill(egui::Color32::from_rgba_premultiplied(30, 30, 30, 200))
-                        .inner_margin(egui::Margin::symmetric(15, 5))
-                        .outer_margin(egui::Margin::ZERO)
-                        .stroke(egui::Stroke::NONE),
-                )
-                .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            // Versão do Launcher
-                            ui.label(
-                                egui::RichText::new(format!("Launcher v{}", self.launcher_version))
-                                    .color(egui::Color32::from_rgb(180, 180, 180))
-                                    .size(12.0),
-                            );
-                            
-                            ui.add_space(15.0);
-                            
-                            // Versão do version.txt
-                            if let Some(version) = &self.current_version {
-                                ui.label(
-                                    egui::RichText::new(format!("Game v{}", version))
-                                        .color(egui::Color32::from_rgb(180, 180, 180))
-                                        .size(12.0),
-                                );
-                            } else {
-                                ui.label(
-                                    egui::RichText::new("Game: não instalado")
-                                        .color(egui::Color32::from_rgb(180, 180, 180))
-                                        .size(12.0),
-                                );
-                            }
-                            
-                            ui.add_space(15.0);
-                            
-                            // Versão do client.exe
-                            if let Some(client_ver) = &self.client_version {
-                                ui.label(
-                                    egui::RichText::new(format!("Client v{}", client_ver))
-                                        .color(egui::Color32::from_rgb(180, 180, 180))
-                                        .size(12.0),
-                                );
-                            } else {
-                                ui.label(
-                                    egui::RichText::new("Client: não encontrado")
-                                        .color(egui::Color32::from_rgb(180, 180, 180))
-                                        .size(12.0),
-                                );
-                            }
-                        });
-
-                        ui.add_space(10.0);
-                        self.proxy_status.render_status_indicators(ui);
-                    });
-                });
-        }
+        // Renderizar todos os componentes de UI
+        ui_components::render_all_components(self, ctx, available_size);
 
         // Renderizar o modal de configuração
         if let Some(config_modal) = &mut self.config_modal {
@@ -1383,7 +947,7 @@ async fn main() -> Result<()> {
     }
 
     // Inicializar o gerenciador de instância
-    let mut instance_manager = InstanceManager::new("ultimaot-launcher");
+    let mut instance_manager = InstanceManager::new(INSTANCE_NAME);
 
     // Verificar se o launcher já está rodando
     if !instance_manager.ensure_single_instance()? {
@@ -1446,11 +1010,11 @@ async fn main() -> Result<()> {
     // });
 
     // Esperar um pouco para os serviços iniciarem
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(STARTUP_DELAY).await;
 
     // Iniciar o aplicativo
     eframe::run_native(
-        "UltimaOT Launcher",
+        APP_NAME,
         WindowManager::get_native_options(),
         Box::new(|cc| {
             // Configurar fonte padrão
@@ -1458,19 +1022,19 @@ async fn main() -> Result<()> {
             style.text_styles = [
                 (
                     egui::TextStyle::Heading,
-                    egui::FontId::new(30.0, egui::FontFamily::Proportional),
+                    egui::FontId::new(FONT_SIZE_HEADING, egui::FontFamily::Proportional),
                 ),
                 (
                     egui::TextStyle::Body,
-                    egui::FontId::new(18.0, egui::FontFamily::Proportional),
+                    egui::FontId::new(FONT_SIZE_BODY, egui::FontFamily::Proportional),
                 ),
                 (
                     egui::TextStyle::Button,
-                    egui::FontId::new(18.0, egui::FontFamily::Proportional),
+                    egui::FontId::new(FONT_SIZE_BUTTON, egui::FontFamily::Proportional),
                 ),
                 (
                     egui::TextStyle::Small,
-                    egui::FontId::new(14.0, egui::FontFamily::Proportional),
+                    egui::FontId::new(FONT_SIZE_SMALL, egui::FontFamily::Proportional),
                 ),
             ]
             .into();

@@ -1,3 +1,4 @@
+use crate::constants::*;
 use crate::proxy::ProxyConfig;
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
@@ -39,7 +40,7 @@ impl ProxyStatus {
         };
 
         // Usar um timeout curto para não travar a UI
-        let timeout = Duration::from_millis(500);
+        let timeout = SERVICE_CHECK_TIMEOUT;
         let start = Instant::now();
 
         match TcpStream::connect_timeout(&socket_addr, timeout) {
