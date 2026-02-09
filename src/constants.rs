@@ -113,6 +113,9 @@ pub const PROXY_STATUS_TIMEOUT: Duration = Duration::from_millis(500);
 /// Intervalo para atualização de status de proxy
 pub const PROXY_STATUS_UPDATE_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Intervalo de repaint quando a janela está escondida no tray (2 segundos)
+pub const HIDDEN_REPAINT_INTERVAL: Duration = Duration::from_secs(2);
+
 /// Duração mínima entre exibições de mensagens
 pub const MESSAGE_DISPLAY_INTERVAL: Duration = Duration::from_secs(2);
 

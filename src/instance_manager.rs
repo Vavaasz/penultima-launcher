@@ -81,7 +81,7 @@ impl InstanceManager {
                 }
 
                 // Dorme por mais tempo para reduzir consumo de CPU
-                thread::sleep(Duration::from_secs(1));
+                thread::sleep(Duration::from_secs(2));
             }
         });
     }

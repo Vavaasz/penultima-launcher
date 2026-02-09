@@ -75,6 +75,7 @@ struct GameLauncher {
     client_version: Option<String>, // Nova variável para armazenar a versão do client.exe
     server_ping: Option<u32>, // Nova variável para armazenar o ping do servidor
     last_ping_check: Option<Instant>, // Momento da última verificação de ping
+    was_hidden: bool, // Controla transição de visibilidade para otimizar CPU quando minimizado
 }
 
 impl Default for GameLauncher {
@@ -133,6 +134,7 @@ impl Default for GameLauncher {
             client_version: None,
             server_ping: None, // Inicializar ping como None
             last_ping_check: None, // Inicializar última verificação como None
+            was_hidden: false,
         };
         
         // Carregar versão do client.exe
@@ -356,9 +358,93 @@ impl GameLauncher {
     }
 
     fn custom_update(&mut self, ctx: &egui::Context) {
+        // === Fast path: quando a janela está escondida no tray, fazer apenas trabalho essencial ===
+        let (is_visible, recently_shown) = {
+            let state = self.window_state.lock().unwrap();
+            (
+                state.visible,
+                state.last_show.elapsed() < Duration::from_secs(2),
+            )
+        };
+
+        let should_hide = !is_visible && !recently_shown && self.initialized;
+
+        if should_hide {
+            // Transição para escondido: executar hide apenas uma vez
+            if !self.was_hidden {
+                self.was_hidden = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                if let Some(wm) = &self.window_manager {
+                    wm.hide_window();
+                }
+            }
+
+            // Trabalho essencial mínimo quando escondido:
+
+            // 1. Drenar canal de mensagens (necessário para detectar comandos)
+            if let Some(receiver) = &mut self.message_receiver {
+                while let Ok(message) = receiver.try_recv() {
+                    match message {
+                        LauncherMessage::PingResult(ping) => {
+                            self.server_ping = ping;
+                            self.last_ping_check = Some(Instant::now());
+                        }
+                        LauncherMessage::SetStatus(status) => { self.status = status; }
+                        LauncherMessage::SetProcessing(processing) => { self.is_processing = processing; }
+                        LauncherMessage::Error(error) => { self.status = error; self.is_processing = false; }
+                        LauncherMessage::VersionUpdated(version) => { self.current_version = Some(version); }
+                        LauncherMessage::ClientVersionUpdated(version) => { self.client_version = Some(version); }
+                        LauncherMessage::DownloadComplete => { self.download_completed = true; }
+                        LauncherMessage::DownloadProgress(progress) => { self.progress = progress; }
+                        _ => {} // Outras mensagens processadas quando visível
+                    }
+                }
+            }
+
+            // 2. Verificar se o processo principal do jogo terminou (para re-mostrar a janela)
+            if let Some(process) = &mut self.game_client.game_process {
+                match process.try_wait() {
+                    Ok(Some(_)) | Err(_) => {
+                        self.game_client.game_process = None;
+                        self.status = "Pronto para jogar".to_string();
+                        self.is_processing = false;
+                        {
+                            let mut state = self.window_state.lock().unwrap();
+                            state.visible = true;
+                            state.last_show = Instant::now();
+                        }
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                        ctx.request_repaint();
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+
+            // 3. Limpar clientes adicionais que terminaram
+            self.game_client.update_additional_clients();
+
+            // 4. Verificar ping do servidor (async, leve)
+            self.check_server_ping();
+
+            // 5. Agendar próximo wake-up com intervalo longo para economizar CPU
+            ctx.request_repaint_after(HIDDEN_REPAINT_INTERVAL);
+
+            return; // Pular toda renderização e trabalho não-essencial
+        }
+
+        // Transição de escondido → visível
+        if self.was_hidden {
+            self.was_hidden = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.request_repaint();
+        }
+
+        // === Caminho normal: janela visível ===
+
         // Verificar ping do servidor periodicamente
         self.check_server_ping();
-        
+
         // Definir o tamanho desejado da janela
         let desired_size = egui::Vec2::new(800.0, 450.0);
         if ctx.available_rect().size() != desired_size {
@@ -617,26 +703,6 @@ impl GameLauncher {
             info!("Solicitando repintura imediata...");
             self.needs_repaint.store(false, Ordering::SeqCst);
             ctx.request_repaint();
-        }
-
-        // Verifica se a janela deve estar visível
-        let (is_visible, recently_shown) = {
-            let state = self.window_state.lock().unwrap();
-            (
-                state.visible,
-                state.last_show.elapsed() < Duration::from_secs(2),
-            )
-        };
-
-        // Só esconde a janela se ela estiver marcada como invisível E não tiver sido mostrada recentemente
-        let should_hide = !is_visible && !recently_shown && self.initialized;
-
-        if should_hide {
-            // Esconder a janela via window_manager
-            if let Some(window_manager) = &self.window_manager {
-                window_manager.hide_window();
-            }
-            return;
         }
 
         // Configurar canais se ainda não existirem
