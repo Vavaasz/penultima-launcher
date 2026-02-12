@@ -2,7 +2,11 @@
   "permissions": {
     "allow": [
       "Bash(grep:*)",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "Bash(cargo build:*)",
+      "Bash(ls:*)",
+      "Bash(findstr:*)",
+      "Bash(dir /s /b \"C:\\\\Users\\\\danie\\\\.cargo\\\\registry\\\\src\")"
     ]
   }
 }
