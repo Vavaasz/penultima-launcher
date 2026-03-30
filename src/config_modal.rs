@@ -52,7 +52,13 @@ impl ConfigModal {
     // Cria uma nova instância do ConfigModal
     pub fn new(game_path: PathBuf) -> Self {
         // Caminho para o arquivo de configuração do cliente
-        let config_path = game_path.join("ArcadiaOT").join("conf").join("config.ini");
+        let direct_config = game_path.join("conf").join("config.ini");
+        let legacy_config = game_path.join("ArcadiaOT").join("conf").join("config.ini");
+        let config_path = if direct_config.exists() {
+            direct_config
+        } else {
+            legacy_config
+        };
 
         info!("Caminho do arquivo de configuração: {:?}", config_path);
 

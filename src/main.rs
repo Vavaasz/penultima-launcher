@@ -76,6 +76,8 @@ struct GameLauncher {
     server_ping: Option<u32>, // Nova variável para armazenar o ping do servidor
     last_ping_check: Option<Instant>, // Momento da última verificação de ping
     was_hidden: bool, // Controla transição de visibilidade para otimizar CPU quando minimizado
+    external_client_mode: bool, // Se true, não executa fluxo de atualização automática
+    clients_hidden_to_tray: bool,
 }
 
 impl Default for GameLauncher {
@@ -84,6 +86,7 @@ impl Default for GameLauncher {
             AppDirs::init().expect("Não foi possível inicializar diretórios da aplicação");
         let download_path = app_dirs.download_path.clone();
         let game_path = app_dirs.game_path.clone();
+        let external_client_mode = AppDirs::is_external_client_mode(&game_path);
 
         // Usar AppDirs::get_version_file_path para obter o caminho do arquivo de versão
         let version_file_path = app_dirs.get_version_file_path();
@@ -94,7 +97,7 @@ impl Default for GameLauncher {
         info!("Clientes disponíveis: {}", available_clients.len());
 
         // Criar GameClient com número máximo específico de clientes
-        let game_client = game_client::GameClient::new(MAX_CLIENTS);
+        let game_client = game_client::GameClient::default();
 
         // Carregar configurações do usuário
         let cache_manager = cache::CacheManager::new(download_path.clone(), game_path.clone());
@@ -135,6 +138,8 @@ impl Default for GameLauncher {
             server_ping: None, // Inicializar ping como None
             last_ping_check: None, // Inicializar última verificação como None
             was_hidden: false,
+            external_client_mode,
+            clients_hidden_to_tray: false,
         };
         
         // Carregar versão do client.exe
@@ -334,6 +339,33 @@ impl GameLauncher {
         }
     }
 
+    fn minimize_clients_to_tray(&mut self, ctx: &egui::Context) {
+        let hidden_windows = self.game_client.minimize_all_to_tray();
+        self.clients_hidden_to_tray = hidden_windows > 0;
+
+        if hidden_windows > 0 {
+            {
+                let mut state = self.window_state.lock().unwrap();
+                state.visible = false;
+            }
+
+            if let Some(window_manager) = &self.window_manager {
+                window_manager.hide_window();
+            }
+
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+
+        self.status = if hidden_windows > 0 {
+            format!("{} janela(s) enviadas para a system tray", hidden_windows)
+        } else {
+            "Nenhuma janela de client encontrada para ocultar".to_string()
+        };
+        self.temp_message_time = Some(Instant::now());
+        self.is_alert_message = false;
+        ctx.request_repaint();
+    }
+
     fn is_game_running(&mut self) -> bool {
         let is_running = self.game_client.is_main_client_running();
 
@@ -402,23 +434,18 @@ impl GameLauncher {
             }
 
             // 2. Verificar se o processo principal do jogo terminou (para re-mostrar a janela)
-            if let Some(process) = &mut self.game_client.game_process {
-                match process.try_wait() {
-                    Ok(Some(_)) | Err(_) => {
-                        self.game_client.game_process = None;
-                        self.status = "Pronto para jogar".to_string();
-                        self.is_processing = false;
-                        {
-                            let mut state = self.window_state.lock().unwrap();
-                            state.visible = true;
-                            state.last_show = Instant::now();
-                        }
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                        ctx.request_repaint();
-                        return;
-                    }
-                    _ => {}
+            if !self.game_client.is_main_client_running() && self.status.contains("Cliente principal")
+            {
+                self.status = "Pronto para jogar".to_string();
+                self.is_processing = false;
+                {
+                    let mut state = self.window_state.lock().unwrap();
+                    state.visible = true;
+                    state.last_show = Instant::now();
                 }
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                ctx.request_repaint();
+                return;
             }
 
             // 3. Limpar clientes adicionais que terminaram
@@ -436,6 +463,7 @@ impl GameLauncher {
         // Transição de escondido → visível
         if self.was_hidden {
             self.was_hidden = false;
+            self.clients_hidden_to_tray = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.request_repaint();
         }
@@ -480,8 +508,19 @@ impl GameLauncher {
             let needs_repaint = self.needs_repaint.clone();
             let message_sender = self.message_sender.clone();
             let disable_auto_start = self.disable_auto_start; // Capturar o estado do checkbox
+            let external_client_mode = self.external_client_mode;
 
             tokio::spawn(async move {
+                if external_client_mode {
+                    if let Some(sender) = message_sender {
+                        sender
+                            .send(LauncherMessage::SetStatus("Pronto para jogar".to_string()))
+                            .ok();
+                        sender.send(LauncherMessage::SetProcessing(false)).ok();
+                    }
+                    return;
+                }
+
                 // Atualizar o status para "Verificando atualizações"
                 if let Some(sender) = message_sender.clone() {
                     let _ = sender.send(LauncherMessage::SetStatus(
@@ -675,27 +714,16 @@ impl GameLauncher {
         }
 
         // Atualiza status do jogo principal
-        if let Some(process) = &mut self.game_client.game_process {
-            match process.try_wait() {
-                Ok(Some(_)) | Err(_) => {
-                    // Processo terminou ou erro
-                    self.game_client.game_process = None;
-                    if self.status == "Jogo em execução..." {
-                        self.status = "Pronto para jogar".to_string();
-                    }
-                    // Garantir que o launcher não fique no estado "processando" após o jogo terminar
-                    self.is_processing = false;
+        if !self.game_client.is_main_client_running() && self.status.contains("em execu") {
+            self.status = "Pronto para jogar".to_string();
+            self.is_processing = false;
 
-                    // Reexibir o launcher quando o jogo fechar
-                    {
-                        let mut state = self.window_state.lock().unwrap();
-                        state.visible = true;
-                        state.last_show = Instant::now();
-                    }
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                }
-                _ => {}
+            {
+                let mut state = self.window_state.lock().unwrap();
+                state.visible = true;
+                state.last_show = Instant::now();
             }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         }
 
         // Verifica se é necessário reexibir a interface
@@ -917,19 +945,9 @@ impl GameLauncher {
     fn load_background(&mut self, ctx: &egui::Context) {
         // Carregar o papel de parede
         if let Ok(image_data) = image::load_from_memory(include_bytes!("../assets/00.png")) {
-            // Converter para RGBA8
             let image = image_data.into_rgba8();
-
-            // Redimensionar para o tamanho da janela (400x500)
-            let resized_image = image::imageops::resize(
-                &image,
-                800,                                   // Largura da janela
-                450,                                   // Altura da janela
-                image::imageops::FilterType::Lanczos3, // Algoritmo de alta qualidade para redimensionamento
-            );
-
-            let (width, height) = resized_image.dimensions();
-            let rgba = resized_image.into_raw();
+            let (width, height) = image.dimensions();
+            let rgba = image.into_raw();
 
             // Criar textura do egui
             let texture =
@@ -939,10 +957,7 @@ impl GameLauncher {
             self.background_texture =
                 Some(ctx.load_texture("background", texture, egui::TextureOptions::default()));
 
-            info!(
-                "Papel de parede carregado e redimensionado para {}x{}",
-                width, height
-            );
+            info!("Papel de parede carregado em {}x{}", width, height);
         } else {
             info!("Não foi possível carregar o papel de parede");
         }
@@ -952,16 +967,8 @@ impl GameLauncher {
         {
             let logo = logo_data.into_rgba8();
 
-            // Redimensionar o logo para o tamanho exato desejado
-            let resized_logo = image::imageops::resize(
-                &logo,
-                LOGO_SIZE.0 as u32,                   // Largura exata
-                LOGO_SIZE.1 as u32,                   // Altura exata
-                image::imageops::FilterType::Lanczos3, // Alta qualidade para o logo
-            );
-
-            let (width, height) = resized_logo.dimensions();
-            let rgba = resized_logo.into_raw();
+            let (width, height) = logo.dimensions();
+            let rgba = logo.into_raw();
 
             // Criar textura do egui para o logo
             let texture =
@@ -971,7 +978,7 @@ impl GameLauncher {
             self.logo_texture =
                 Some(ctx.load_texture("logo", texture, egui::TextureOptions::default()));
 
-            info!("Logo carregado e redimensionado para {}x{}", width, height);
+            info!("Logo carregado em {}x{}", width, height);
         } else {
             info!("Não foi possível carregar o logo");
         }
@@ -1050,7 +1057,8 @@ async fn main() -> Result<()> {
     window_manager.show_window();
 
     // Configurar o ícone da bandeja usando o TrayManager
-    let mut tray_manager = TrayManager::new();
+    let tracked_client_pids = Arc::new(Mutex::new(Vec::new()));
+    let mut tray_manager = TrayManager::new(tracked_client_pids.clone());
     tray_manager.setup(window_state.clone())?;
 
     // Usar load_window_icon para carregar o ícone
@@ -1082,7 +1090,7 @@ async fn main() -> Result<()> {
     eframe::run_native(
         APP_NAME,
         WindowManager::get_native_options(),
-        Box::new(|cc| {
+        Box::new(move |cc| {
             // Configurar fonte padrão
             let mut style = (*cc.egui_ctx.style()).clone();
             style.text_styles = [
@@ -1107,6 +1115,8 @@ async fn main() -> Result<()> {
             cc.egui_ctx.set_style(style);
 
             let mut launcher = GameLauncher::default();
+            launcher.game_client =
+                game_client::GameClient::new(MAX_CLIENTS, tracked_client_pids.clone());
             launcher.window_state = window_state;
             launcher.initialized = false;
             // launcher.auto_hide = args.auto_hide; // Define auto_hide baseado no argumento de linha de comando
@@ -1131,6 +1141,30 @@ impl eframe::App for GameLauncher {
         // Interceptar evento de fechamento
         if ctx.input(|i| i.viewport().close_requested()) {
             info!("Evento de fechamento detectado!");
+            if self.clients_hidden_to_tray {
+                let restored = self
+                    .game_client
+                    .restore_all_from_tray_for_launcher();
+                self.clients_hidden_to_tray = false;
+
+                {
+                    let mut state = self.window_state.lock().unwrap();
+                    state.visible = true;
+                    state.last_show = Instant::now();
+                }
+
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.status = format!(
+                    "{} janela(s) restauradas antes de fechar o launcher",
+                    restored
+                );
+                self.temp_message_time = Some(Instant::now());
+                self.is_alert_message = false;
+                ctx.request_repaint();
+                return;
+            }
+
             // Verifica se há clientes ativos
             let (has_main, additional_count) = self.game_client.get_clients_count();
             if has_main || additional_count > 0 {

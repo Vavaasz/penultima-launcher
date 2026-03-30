@@ -65,6 +65,7 @@ pub const APP_DATA_DIR: &str = "UltimaOT Launcher";
 
 /// Nome do diretório home no Linux/Mac
 pub const HOME_DIR: &str = ".ultimaot-launcher";
+pub const EXTERNAL_GAME_PATH: &str = r"D:\CalmeraLauncher\Calmera_Global";
 
 // ================================
 // CONFIGURAÇÕES DE PROXY

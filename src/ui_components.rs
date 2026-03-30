@@ -178,6 +178,14 @@ impl GameLauncher {
                                     .color(color),
                             )
                         );
+                    } else if self.last_ping_check.is_some() {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new("Ping: indisponivel")
+                                    .size(12.0)
+                                    .color(egui::Color32::from_rgb(255, 120, 120)),
+                            )
+                        );
                     } else {
                         ui.add(
                             egui::Label::new(
@@ -399,6 +407,27 @@ impl GameLauncher {
         // Container para os botões inferiores com layout específico
         // Verificar se há clientes rodando antes de mostrar os botões
         let (has_main, additional_count) = self.game_client.get_clients_count();
+        if !self.is_processing {
+            ui.horizontal_centered(|ui| {
+                if ui
+                    .add_sized(
+                        [150.0, 30.0],
+                        egui::Button::new(
+                            egui::RichText::new("System Tray")
+                                .size(14.0)
+                                .color(egui::Color32::from_rgb(220, 220, 220)),
+                        )
+                        .fill(egui::Color32::from_rgba_unmultiplied(40, 40, 40, 210))
+                        .corner_radius(4.0)
+                        .stroke(egui::Stroke::NONE),
+                    )
+                    .clicked()
+                {
+                    self.minimize_clients_to_tray(ctx);
+                }
+            });
+        }
+
         if !has_main && additional_count == 0 && !self.is_processing {
             ui.horizontal(|ui| {
                 // Botão Forçar Atualização (esquerda)

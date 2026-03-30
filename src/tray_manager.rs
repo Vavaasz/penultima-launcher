@@ -1,13 +1,11 @@
 use crate::constants::*;
-use crate::game_client::WindowState;
+use crate::game_client::{GameClient, WindowState};
 use crate::window_manager::WindowManager;
 use anyhow::{Context, Result};
 use eframe::egui::IconData;
-use image;
 use log::info;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuId, MenuItemBuilder},
     Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
@@ -17,40 +15,38 @@ pub struct TrayManager {
     pub tray_icon: Option<TrayIcon>,
     restore_id: MenuId,
     quit_id: MenuId,
+    tracked_pids: Arc<Mutex<Vec<u32>>>,
 }
 
 impl TrayManager {
-    pub fn new() -> Self {
+    pub fn new(tracked_pids: Arc<Mutex<Vec<u32>>>) -> Self {
         Self {
             tray_icon: None,
             restore_id: MenuId::new("restore"),
             quit_id: MenuId::new("quit"),
+            tracked_pids,
         }
     }
 
-    // Configurar ícone da bandeja e eventos
     pub fn setup(&mut self, window_state: Arc<Mutex<WindowState>>) -> Result<()> {
-        info!("Criando ícone na bandeja...");
+        info!("Criando Ã­cone na bandeja...");
 
-        // Carregar o ícone
         let icon = include_bytes!("../assets/ultima-logo.ico");
         let (icon_rgba, icon_width, icon_height) = {
             let image = image::load_from_memory(icon)
-                .context("Falha ao carregar ícone")?
+                .context("Falha ao carregar Ã­cone")?
                 .into_rgba8();
             let (width, height) = image.dimensions();
-            let rgba = image.into_raw();
-            (rgba, width, height)
+            (image.into_raw(), width, height)
         };
 
         let icon =
-            Icon::from_rgba(icon_rgba, icon_width, icon_height).context("Falha ao criar ícone")?;
+            Icon::from_rgba(icon_rgba, icon_width, icon_height).context("Falha ao criar Ã­cone")?;
 
         let tray_menu = Menu::new();
         let restore_id = self.restore_id.clone();
         let quit_id = self.quit_id.clone();
 
-        // Criar os itens do menu
         let restore_item = MenuItemBuilder::new()
             .text("Abrir")
             .id(restore_id)
@@ -63,11 +59,9 @@ impl TrayManager {
             .enabled(true)
             .build();
 
-        // Adicionar os itens ao menu
         tray_menu
             .append(&restore_item)
             .context("Falha ao adicionar item Abrir")?;
-
         tray_menu
             .append(&quit_item)
             .context("Falha ao adicionar item Sair")?;
@@ -77,59 +71,55 @@ impl TrayManager {
             .with_icon(icon)
             .with_menu(Box::new(tray_menu))
             .build()
-            .context("Falha ao criar ícone na system tray")?;
+            .context("Falha ao criar Ã­cone na system tray")?;
 
         self.tray_icon = Some(tray_icon);
 
-        info!("Ícone criado com sucesso!");
-
-        // Configurar eventos do menu
-        self.setup_menu_events(window_state.clone());
-
-        // Configurar eventos do ícone
-        self.setup_icon_events(window_state);
+        self.setup_menu_events(window_state.clone(), self.tracked_pids.clone());
+        self.setup_icon_events(window_state, self.tracked_pids.clone());
 
         Ok(())
     }
 
-    // Configurar eventos do menu
-    fn setup_menu_events(&self, window_state: Arc<Mutex<WindowState>>) {
+    fn setup_menu_events(
+        &self,
+        window_state: Arc<Mutex<WindowState>>,
+        tracked_pids: Arc<Mutex<Vec<u32>>>,
+    ) {
         let menu_channel = MenuEvent::receiver();
         let restore_id = self.restore_id.clone();
         let quit_id = self.quit_id.clone();
-        let window_state_menu = window_state.clone();
 
         thread::spawn(move || {
-            // Criar uma instância de WindowManager para usar seu método show_window
             let window_manager = WindowManager {
-                window_state: window_state_menu.clone(),
+                window_state,
                 needs_repaint: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             };
 
             while let Ok(event) = menu_channel.recv() {
                 if event.id == restore_id {
-                    info!("Menu Abrir clicado!");
-                    // Usar o método do WindowManager em vez da função independente
                     window_manager.show_window();
+                    let restored = GameClient::restore_all_from_tray(&tracked_pids);
+                    info!("Tray restore executado para {} janela(s) de client", restored);
                 } else if event.id == quit_id {
-                    info!("Menu Sair clicado!");
+                    let restored = GameClient::restore_all_from_tray(&tracked_pids);
+                    info!("Tray quit restaurou {} janela(s) de client", restored);
                     std::process::exit(0);
                 }
-
-                thread::sleep(Duration::from_secs(1));
             }
         });
     }
 
-    // Configurar eventos do ícone
-    fn setup_icon_events(&self, window_state: Arc<Mutex<WindowState>>) {
-        let window_state_icon = window_state.clone();
+    fn setup_icon_events(
+        &self,
+        window_state: Arc<Mutex<WindowState>>,
+        tracked_pids: Arc<Mutex<Vec<u32>>>,
+    ) {
         let event_channel = TrayIconEvent::receiver();
 
         thread::spawn(move || {
-            // Criar uma instância de WindowManager para usar seu método show_window
             let window_manager = WindowManager {
-                window_state: window_state_icon.clone(),
+                window_state,
                 needs_repaint: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             };
 
@@ -141,25 +131,21 @@ impl TrayManager {
                 } = event
                 {
                     if button == MouseButton::Left && button_state == MouseButtonState::Up {
-                        info!("Ícone clicado! Tornando janela visível...");
-                        // Usar o método do WindowManager em vez da função independente
                         window_manager.show_window();
+                        let restored = GameClient::restore_all_from_tray(&tracked_pids);
+                        info!("Tray click restaurou {} janela(s) de client", restored);
                     }
                 }
-                thread::sleep(Duration::from_secs(1));
             }
         });
     }
 
-    // Função para carregar o ícone do aplicativo para a janela
     pub fn load_window_icon() -> Option<Arc<IconData>> {
         let icon = include_bytes!("../assets/ultima-logo.ico");
         let (icon_rgba, icon_width, icon_height) = {
-            let image = image::load_from_memory(icon).ok()?;
-            let image = image.into_rgba8();
+            let image = image::load_from_memory(icon).ok()?.into_rgba8();
             let (width, height) = image.dimensions();
-            let rgba = image.into_raw();
-            (rgba, width, height)
+            (image.into_raw(), width, height)
         };
 
         Some(Arc::new(IconData {

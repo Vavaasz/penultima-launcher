@@ -14,6 +14,14 @@ pub struct AppDirs {
 }
 
 impl AppDirs {
+    pub fn external_game_path() -> PathBuf {
+        PathBuf::from(EXTERNAL_GAME_PATH)
+    }
+
+    pub fn is_external_client_mode(game_path: &Path) -> bool {
+        game_path == Self::external_game_path()
+    }
+
     /// Obtém o diretório base que o egui já está criando
     pub fn get_base_dir() -> Option<PathBuf> {
         // Obter %APPDATA% no Windows onde o egui cria a pasta "ArcadiaOT Launcher"
@@ -41,7 +49,16 @@ impl AppDirs {
 
         // Criar subdiretórios dentro do diretório base único
         let download_path = base_dir.join("downloads");
-        let game_path = base_dir.join("game");
+        let external_game_path = Self::external_game_path();
+        let game_path = if external_game_path.join("bin").join("client.exe").exists() {
+            info!(
+                "Cliente externo detectado, usando game_path: {}",
+                external_game_path.display()
+            );
+            external_game_path
+        } else {
+            base_dir.join("game")
+        };
 
         fs::create_dir_all(&base_dir).context("Não foi possível criar diretório base")?;
         fs::create_dir_all(&download_path)
@@ -62,6 +79,12 @@ impl AppDirs {
 
     /// Obtem todos os caminhos de client.exe no diretório do jogo
     pub fn find_client_paths(&self) -> Vec<PathBuf> {
+        let direct_client = self.game_path.join("bin").join("client.exe");
+        if direct_client.exists() {
+            info!("Encontrado client.exe direto: {}", direct_client.display());
+            return vec![direct_client];
+        }
+
         let glob_pattern = self.game_path.join("*/bin/client.exe");
 
         match glob::glob(glob_pattern.to_str().unwrap_or("")) {
