@@ -3,13 +3,13 @@ use crate::game_client::WindowState;
 use eframe::egui;
 use egui::IconData;
 use image;
+use log::info;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use log::info;
 use winapi::um::winuser::{
-    FindWindowW, SetForegroundWindow, SetWindowPos, ShowWindow, HWND_NOTOPMOST, HWND_TOPMOST,
-    SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_RESTORE, SW_SHOW, IsWindowVisible, IsIconic,
+    FindWindowW, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, IsWindowVisible, SW_HIDE, SW_RESTORE,
+    SW_SHOW, SWP_NOMOVE, SWP_NOSIZE, SetForegroundWindow, SetWindowPos, ShowWindow,
 };
 
 pub struct WindowManager {
@@ -50,17 +50,14 @@ impl WindowManager {
             use std::os::windows::ffi::OsStrExt;
             use std::ptr::null_mut;
 
-            let title: Vec<u16> = OsStr::new(APP_NAME)
-                .encode_wide()
-                .chain(Some(0))
-                .collect();
+            let title: Vec<u16> = OsStr::new(APP_NAME).encode_wide().chain(Some(0)).collect();
 
             let hwnd = FindWindowW(null_mut(), title.as_ptr());
             if !hwnd.is_null() {
                 // Verifica se a janela já está visível e não está minimizada
                 let is_visible = IsWindowVisible(hwnd) != 0;
                 let is_minimized = IsIconic(hwnd) != 0;
-                
+
                 // Só executa a restauração se a janela estiver invisível ou minimizada
                 if !is_visible || is_minimized {
                     info!("Janela encontrada, restaurando...");
@@ -96,10 +93,7 @@ impl WindowManager {
             use std::os::windows::ffi::OsStrExt;
             use std::ptr::null_mut;
 
-            let title: Vec<u16> = OsStr::new(APP_NAME)
-                .encode_wide()
-                .chain(Some(0))
-                .collect();
+            let title: Vec<u16> = OsStr::new(APP_NAME).encode_wide().chain(Some(0)).collect();
 
             let hwnd = FindWindowW(null_mut(), title.as_ptr());
             if !hwnd.is_null() {
@@ -120,6 +114,7 @@ impl WindowManager {
             persist_window: false,
             centered: true, // Isto já está correto
             vsync: true,
+            renderer: eframe::Renderer::Glow,
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([WINDOW_SIZE.0, WINDOW_SIZE.1])
                 .with_visible(true)

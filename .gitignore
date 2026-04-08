@@ -1,4 +1,6 @@
 /target
+/target-app
+/target-validation
 /.vs
 /.idea
 nul

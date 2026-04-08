@@ -1,7 +1,7 @@
 use anyhow::Result;
 use log::info;
 use windows::Win32::System::Threading::{
-    GetCurrentProcess, SetPriorityClass, HIGH_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS,
+    GetCurrentProcess, HIGH_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS, SetPriorityClass,
 };
 
 /// Configura a prioridade do processo no Windows

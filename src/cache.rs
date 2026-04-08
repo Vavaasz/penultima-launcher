@@ -1,5 +1,5 @@
-use crate::tokio::sync::mpsc;
 use crate::LauncherMessage;
+use crate::tokio::sync::mpsc;
 use anyhow::Result;
 use log::info;
 use serde::{Deserialize, Serialize};
@@ -17,9 +17,17 @@ pub struct CacheManager {
     game_path: PathBuf,
 }
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize)]
 pub struct UserSettings {
     pub disable_auto_start: bool,
+}
+
+impl Default for UserSettings {
+    fn default() -> Self {
+        Self {
+            disable_auto_start: true,
+        }
+    }
 }
 
 impl CacheManager {

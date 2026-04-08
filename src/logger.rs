@@ -1,6 +1,6 @@
+use crate::constants::*;
 use log::{Level, LevelFilter, Metadata, Record, SetLoggerError};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use crate::constants::*;
 
 // Um logger personalizado que pode ser ativado ou desativado
 pub struct AppLogger {

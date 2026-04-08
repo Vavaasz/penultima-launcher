@@ -3,12 +3,17 @@ use log::info;
 use std::time::Duration;
 use tokio::sync::mpsc::unbounded_channel;
 
-use crate::cache;
-use crate::message_system::LauncherMessage;
 use crate::GameLauncher;
+use crate::cache;
+use crate::constants::{ACCENT_PRIMARY_RGB, ACCENT_SECONDARY_RGB, SURFACE_RGB};
+use crate::message_system::LauncherMessage;
 
 /// Função principal que renderiza todos os componentes de UI
-pub fn render_all_components(launcher: &mut GameLauncher, ctx: &egui::Context, available_size: egui::Vec2) {
+pub fn render_all_components(
+    launcher: &mut GameLauncher,
+    ctx: &egui::Context,
+    available_size: egui::Vec2,
+) {
     // Renderizar rodapé se necessário
     let footer_height = if launcher.show_footer { 35.0 } else { 0.0 };
     if launcher.show_footer {
@@ -33,8 +38,13 @@ pub fn render_all_components(launcher: &mut GameLauncher, ctx: &egui::Context, a
                 .show(ctx, |ui| {
                     egui::Frame::new()
                         .fill(egui::Color32::from_black_alpha(100))
-                        .corner_radius(5.0)
-                        .inner_margin(egui::Margin { left: 8, right: 8, top: 5, bottom: 5 })
+                        .corner_radius(14.0)
+                        .inner_margin(egui::Margin {
+                            left: 8,
+                            right: 8,
+                            top: 5,
+                            bottom: 5,
+                        })
                         .show(ui, |ui| {
                             launcher.render_version_panel_impl(ui);
                         });
@@ -46,8 +56,13 @@ pub fn render_all_components(launcher: &mut GameLauncher, ctx: &egui::Context, a
                 .show(ctx, |ui| {
                     egui::Frame::new()
                         .fill(egui::Color32::from_black_alpha(100))
-                        .corner_radius(5.0)
-                        .inner_margin(egui::Margin { left: 8, right: 8, top: 5, bottom: 5 })
+                        .corner_radius(14.0)
+                        .inner_margin(egui::Margin {
+                            left: 8,
+                            right: 8,
+                            top: 5,
+                            bottom: 5,
+                        })
                         .show(ui, |ui| {
                             launcher.render_ping_panel_impl(ui);
                         });
@@ -63,7 +78,13 @@ pub fn render_all_components(launcher: &mut GameLauncher, ctx: &egui::Context, a
                 // Renderizar botões principais
                 let button_width = 200.0;
                 let button_height = 40.0;
-                launcher.render_main_buttons_impl(ui, ctx, button_width, button_height, available_size);
+                launcher.render_main_buttons_impl(
+                    ui,
+                    ctx,
+                    button_width,
+                    button_height,
+                    available_size,
+                );
 
                 // Renderizar botões inferiores
                 launcher.render_bottom_buttons_impl(ui, ctx, button_height);
@@ -91,7 +112,7 @@ impl GameLauncher {
             ui.painter().rect_filled(
                 available_rect,
                 0.0,
-                egui::Color32::from_black_alpha(153),
+                egui::Color32::from_rgba_unmultiplied(8, 12, 22, 176),
             );
         }
     }
@@ -101,52 +122,41 @@ impl GameLauncher {
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
                 ui.vertical(|ui| {
-                    
                     // Versão do Launcher
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(format!("Launcher v{}", self.launcher_version))
-                                .size(12.0)
-                                .color(egui::Color32::from_rgba_unmultiplied(200, 200, 200, 180)),
-                        )
-                    );
-                    
+                    ui.add(egui::Label::new(
+                        egui::RichText::new(format!("Launcher v{}", self.launcher_version))
+                            .size(12.0)
+                            .color(egui::Color32::from_rgba_unmultiplied(200, 200, 200, 180)),
+                    ));
+
                     // Versão do Game (version.txt)
                     if let Some(version) = &self.current_version {
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(format!("Game v{}", version))
-                                    .size(12.0)
-                                    .color(egui::Color32::from_rgba_unmultiplied(200, 200, 200, 180)),
-                            )
-                        );
+                        ui.add(egui::Label::new(
+                            egui::RichText::new(format!("Game v{}", version))
+                                .size(12.0)
+                                .color(egui::Color32::from_rgba_unmultiplied(200, 200, 200, 180)),
+                        ));
                     } else {
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new("Game: não instalado")
-                                    .size(12.0)
-                                    .color(egui::Color32::from_rgba_unmultiplied(200, 200, 200, 180)),
-                            )
-                        );
+                        ui.add(egui::Label::new(
+                            egui::RichText::new("Game: não instalado")
+                                .size(12.0)
+                                .color(egui::Color32::from_rgba_unmultiplied(200, 200, 200, 180)),
+                        ));
                     }
-                    
+
                     // Versão do Client (client.exe)
                     if let Some(client_ver) = &self.client_version {
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(format!("Client v{}", client_ver))
-                                    .size(12.0)
-                                    .color(egui::Color32::from_rgba_unmultiplied(200, 200, 200, 180)),
-                            )
-                        );
+                        ui.add(egui::Label::new(
+                            egui::RichText::new(format!("Client v{}", client_ver))
+                                .size(12.0)
+                                .color(egui::Color32::from_rgba_unmultiplied(200, 200, 200, 180)),
+                        ));
                     } else {
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new("Client: não encontrado")
-                                    .size(12.0)
-                                    .color(egui::Color32::from_rgba_unmultiplied(200, 200, 200, 180)),
-                            )
-                        );
+                        ui.add(egui::Label::new(
+                            egui::RichText::new("Client: não encontrado")
+                                .size(12.0)
+                                .color(egui::Color32::from_rgba_unmultiplied(200, 200, 200, 180)),
+                        ));
                     }
                 });
             });
@@ -160,7 +170,6 @@ impl GameLauncher {
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
                 ui.vertical(|ui| {
-                    
                     // Ping do servidor
                     if let Some(ping) = self.server_ping {
                         let color = if ping <= 50 {
@@ -170,30 +179,24 @@ impl GameLauncher {
                         } else {
                             egui::Color32::from_rgb(255, 0, 0) // Vermelho para ping alto
                         };
-                        
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(format!("Ping: {}ms", ping))
-                                    .size(12.0)
-                                    .color(color),
-                            )
-                        );
+
+                        ui.add(egui::Label::new(
+                            egui::RichText::new(format!("Ping: {}ms", ping))
+                                .size(12.0)
+                                .color(color),
+                        ));
                     } else if self.last_ping_check.is_some() {
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new("Ping: indisponivel")
-                                    .size(12.0)
-                                    .color(egui::Color32::from_rgb(255, 120, 120)),
-                            )
-                        );
+                        ui.add(egui::Label::new(
+                            egui::RichText::new("Ping: indisponivel")
+                                .size(12.0)
+                                .color(egui::Color32::from_rgb(255, 120, 120)),
+                        ));
                     } else {
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new("Ping: verificando...")
-                                    .size(12.0)
-                                    .color(egui::Color32::from_rgba_unmultiplied(200, 200, 200, 180)),
-                            )
-                        );
+                        ui.add(egui::Label::new(
+                            egui::RichText::new("Ping: verificando...")
+                                .size(12.0)
+                                .color(egui::Color32::from_rgba_unmultiplied(200, 200, 200, 180)),
+                        ));
                     }
                 });
             });
@@ -217,7 +220,12 @@ impl GameLauncher {
     }
 
     /// Renderiza o indicador de carregamento e status
-    pub fn render_loading_indicator_impl(&self, ui: &mut egui::Ui, ctx: &egui::Context, available_size: egui::Vec2) {
+    pub fn render_loading_indicator_impl(
+        &self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        available_size: egui::Vec2,
+    ) {
         // Indicador de carregamento ou status
         if self.is_processing
             || !self.game_client.get_clients_count().1.eq(&0)
@@ -226,8 +234,7 @@ impl GameLauncher {
         {
             // Reservar espaço para o indicador ou status
             let indicator_height = 45.0;
-            let response =
-                ui.allocate_space(egui::Vec2::new(available_size.x, indicator_height));
+            let response = ui.allocate_space(egui::Vec2::new(available_size.x, indicator_height));
             let rect = response.1;
             let center = rect.center();
 
@@ -247,14 +254,16 @@ impl GameLauncher {
                     let y = center.y + radius * point_angle.sin();
                     let point_pos = egui::Pos2::new(x, y);
                     let point_size = 3.5_f32
-                        + 3.0
-                            * ((angle * 2.0 + i as f32 * 0.5) % std::f32::consts::TAU)
-                                .sin();
+                        + 3.0 * ((angle * 2.0 + i as f32 * 0.5) % std::f32::consts::TAU).sin();
 
                     ui.painter().circle_filled(
                         point_pos,
                         point_size,
-                        egui::Color32::ORANGE,
+                        egui::Color32::from_rgb(
+                            ACCENT_PRIMARY_RGB.0,
+                            ACCENT_PRIMARY_RGB.1,
+                            ACCENT_PRIMARY_RGB.2,
+                        ),
                     );
                 }
 
@@ -292,9 +301,16 @@ impl GameLauncher {
     }
 
     /// Renderiza os botões principais (Jogar, Cliente Adicional)
-    pub fn render_main_buttons_impl(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, button_width: f32, button_height: f32, available_size: egui::Vec2) {
+    pub fn render_main_buttons_impl(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        button_width: f32,
+        button_height: f32,
+        available_size: egui::Vec2,
+    ) {
         // Espaço dinâmico para empurrar os botões para baixo quando não há indicador de carregamento
-        let (has_main, additional_count) = self.game_client.get_clients_count();
+        let (has_main, additional_count) = self.game_client.sync_client_state();
         if !self.is_processing
             && additional_count == 0
             && !has_main
@@ -310,7 +326,7 @@ impl GameLauncher {
         let indent = (available_width - button_width) / 2.0;
 
         let is_game_running = self.is_game_running();
-        let (_, has_additional_clients) = self.game_client.get_clients_count();
+        let (_, has_additional_clients) = self.game_client.sync_client_state();
         let has_additional_clients = has_additional_clients > 0;
 
         if self.is_processing {
@@ -319,7 +335,7 @@ impl GameLauncher {
             // Mostra APENAS o botão NOVO CLIENTE quando o jogo principal ou clientes adicionais estão rodando
             ui.horizontal(|ui| {
                 ui.add_space(indent);
-                let (_, additional_count) = self.game_client.get_clients_count();
+                let (_, additional_count) = self.game_client.sync_client_state();
                 let max_clients = self.game_client.max_clients;
                 let can_launch = additional_count < max_clients;
 
@@ -327,13 +343,9 @@ impl GameLauncher {
                     .add_sized(
                         [button_width, button_height],
                         egui::Button::new(
-                            egui::RichText::new(format!(
-                                "▶ Cliente Adicional ({}/{})",
-                                additional_count, max_clients
-                            ))
-                            .size(15.0)
-                            .color(
-                                if can_launch {
+                            egui::RichText::new("▶ Abrir Outro Cliente")
+                                .size(15.0)
+                                .color(if can_launch {
                                     if ui.ui_contains_pointer() {
                                         egui::Color32::BLACK
                                     } else {
@@ -341,14 +353,21 @@ impl GameLauncher {
                                     }
                                 } else {
                                     egui::Color32::GRAY
-                                },
-                            ),
+                                }),
                         )
                         .fill(if can_launch {
                             if ui.ui_contains_pointer() {
-                                egui::Color32::from_rgb(92, 200, 92)
+                                egui::Color32::from_rgb(
+                                    ACCENT_PRIMARY_RGB.0,
+                                    ACCENT_PRIMARY_RGB.1,
+                                    ACCENT_PRIMARY_RGB.2,
+                                )
                             } else {
-                                egui::Color32::from_rgb(76, 175, 80)
+                                egui::Color32::from_rgb(
+                                    ACCENT_SECONDARY_RGB.0,
+                                    ACCENT_SECONDARY_RGB.1,
+                                    ACCENT_SECONDARY_RGB.2,
+                                )
                             }
                         } else {
                             egui::Color32::from_rgb(150, 150, 150)
@@ -359,7 +378,7 @@ impl GameLauncher {
                     .clicked()
                     && can_launch
                 {
-                    if let Err(e) = self.launch_client(ctx) {
+                    if let Err(e) = self.launch_client() {
                         self.status = format!("Erro ao iniciar o cliente: {}", e);
                     }
                 }
@@ -371,19 +390,25 @@ impl GameLauncher {
                 if ui
                     .add_sized(
                         [button_width, button_height],
-                        egui::Button::new(
-                            egui::RichText::new("▶ JOGAR").size(22.0).color(
-                                if ui.ui_contains_pointer() {
-                                    egui::Color32::BLACK
-                                } else {
-                                    egui::Color32::WHITE
-                                },
-                            ),
-                        )
+                        egui::Button::new(egui::RichText::new("▶ JOGAR").size(22.0).color(
+                            if ui.ui_contains_pointer() {
+                                egui::Color32::BLACK
+                            } else {
+                                egui::Color32::WHITE
+                            },
+                        ))
                         .fill(if ui.ui_contains_pointer() {
-                            egui::Color32::from_rgb(92, 200, 92)
+                            egui::Color32::from_rgb(
+                                ACCENT_PRIMARY_RGB.0,
+                                ACCENT_PRIMARY_RGB.1,
+                                ACCENT_PRIMARY_RGB.2,
+                            )
                         } else {
-                            egui::Color32::from_rgb(76, 175, 80)
+                            egui::Color32::from_rgb(
+                                ACCENT_SECONDARY_RGB.0,
+                                ACCENT_SECONDARY_RGB.1,
+                                ACCENT_SECONDARY_RGB.2,
+                            )
                         })
                         .corner_radius(10.0)
                         .stroke(egui::Stroke::NONE),
@@ -399,31 +424,41 @@ impl GameLauncher {
     }
 
     /// Renderiza os botões inferiores (Forçar Atualização, Limpar Cache, etc.)
-    pub fn render_bottom_buttons_impl(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, button_height: f32) {
+    pub fn render_bottom_buttons_impl(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        button_height: f32,
+    ) {
         // Espaço flexível para empurrar os botões para baixo
         let available_height = ui.available_height();
         ui.add_space(available_height - button_height - 1.0);
 
         // Container para os botões inferiores com layout específico
         // Verificar se há clientes rodando antes de mostrar os botões
-        let (has_main, additional_count) = self.game_client.get_clients_count();
+        let (has_main, additional_count) = self.game_client.sync_client_state();
         if !self.is_processing {
             ui.horizontal_centered(|ui| {
                 if ui
                     .add_sized(
                         [150.0, 30.0],
                         egui::Button::new(
-                            egui::RichText::new("System Tray")
+                            egui::RichText::new("Minimizar no Tray")
                                 .size(14.0)
                                 .color(egui::Color32::from_rgb(220, 220, 220)),
                         )
-                        .fill(egui::Color32::from_rgba_unmultiplied(40, 40, 40, 210))
-                        .corner_radius(4.0)
+                        .fill(egui::Color32::from_rgba_unmultiplied(
+                            SURFACE_RGB.0,
+                            SURFACE_RGB.1,
+                            SURFACE_RGB.2,
+                            220,
+                        ))
+                        .corner_radius(12.0)
                         .stroke(egui::Stroke::NONE),
                     )
                     .clicked()
                 {
-                    self.minimize_clients_to_tray(ctx);
+                    self.minimize_to_tray(ctx);
                 }
             });
         }
@@ -431,33 +466,26 @@ impl GameLauncher {
         if !has_main && additional_count == 0 && !self.is_processing {
             ui.horizontal(|ui| {
                 // Botão Forçar Atualização (esquerda)
-                ui.with_layout(
-                    egui::Layout::left_to_right(egui::Align::BOTTOM),
-                    |ui| {
-                        ui.add_space(10.0);
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::BOTTOM), |ui| {
+                    ui.add_space(10.0);
 
-                        if ui
-                            .add_sized(
-                                [130.0, 30.0],
-                                egui::Button::new(
-                                    egui::RichText::new("Forçar Atualização")
-                                        .size(14.0)
-                                        .color(egui::Color32::from_rgba_unmultiplied(
-                                            200, 200, 200, 180,
-                                        )),
-                                )
-                                .fill(egui::Color32::from_rgba_unmultiplied(
-                                    40, 40, 40, 180,
-                                ))
-                                .corner_radius(4.0)
-                                .stroke(egui::Stroke::NONE),
+                    if ui
+                        .add_sized(
+                            [130.0, 30.0],
+                            egui::Button::new(
+                                egui::RichText::new("Forçar Atualização").size(14.0).color(
+                                    egui::Color32::from_rgba_unmultiplied(200, 200, 200, 180),
+                                ),
                             )
-                            .clicked()
-                        {
-                            self.show_force_update_modal = true;
-                        }
-                    },
-                );
+                            .fill(egui::Color32::from_rgba_unmultiplied(40, 40, 40, 180))
+                            .corner_radius(4.0)
+                            .stroke(egui::Stroke::NONE),
+                        )
+                        .clicked()
+                    {
+                        self.show_force_update_modal = true;
+                    }
+                });
 
                 // Espaço flexível antes do checkbox
                 ui.add_space(ui.available_width() * 0.22);
@@ -476,11 +504,9 @@ impl GameLauncher {
                     self.disable_auto_start = disable_auto_start;
                     // Salvar a configuração quando alterada
                     let settings = cache::UserSettings { disable_auto_start };
-                    if let Err(e) = cache::CacheManager::new(
-                        self.download_path.clone(),
-                        self.game_path.clone(),
-                    )
-                    .save_user_settings(&settings)
+                    if let Err(e) =
+                        cache::CacheManager::new(self.download_path.clone(), self.game_path.clone())
+                            .save_user_settings(&settings)
                     {
                         info!("Erro ao salvar configurações: {}", e);
                     }
@@ -490,66 +516,55 @@ impl GameLauncher {
                 ui.add_space(ui.available_width() * 0.18);
 
                 // Botão Limpar Cache (direita)
-                ui.with_layout(
-                    egui::Layout::right_to_left(egui::Align::BOTTOM),
-                    |ui| {
-                        ui.add_space(10.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::BOTTOM), |ui| {
+                    ui.add_space(10.0);
 
-                        if ui
-                            .add_sized(
-                                [130.0, 30.0],
-                                egui::Button::new(
-                                    egui::RichText::new("Limpar Cache")
-                                        .size(14.0)
-                                        .color(egui::Color32::from_rgba_unmultiplied(
-                                            200, 200, 200, 180,
-                                        )),
-                                )
-                                .fill(egui::Color32::from_rgba_unmultiplied(
-                                    40, 40, 40, 180,
-                                ))
-                                .corner_radius(4.0)
-                                .stroke(egui::Stroke::NONE),
+                    if ui
+                        .add_sized(
+                            [130.0, 30.0],
+                            egui::Button::new(
+                                egui::RichText::new("Limpar Cache").size(14.0).color(
+                                    egui::Color32::from_rgba_unmultiplied(200, 200, 200, 180),
+                                ),
                             )
-                            .clicked()
-                        {
-                            let (tx, rx) = unbounded_channel();
-                            self.message_receiver = Some(rx);
-                            self.status = "Limpando cache...".to_string();
-                            self.is_processing = true;
-                            self.progress = 0.0;
-                            ctx.request_repaint();
+                            .fill(egui::Color32::from_rgba_unmultiplied(40, 40, 40, 180))
+                            .corner_radius(4.0)
+                            .stroke(egui::Stroke::NONE),
+                        )
+                        .clicked()
+                    {
+                        let (tx, rx) = unbounded_channel();
+                        self.message_receiver = Some(rx);
+                        self.status = "Limpando cache...".to_string();
+                        self.is_processing = true;
+                        self.progress = 0.0;
+                        ctx.request_repaint();
 
-                            let download_path = self.download_path.clone();
-                            let game_path = self.game_path.clone();
-                            let cache_manager =
-                                cache::CacheManager::new(download_path, game_path);
+                        let download_path = self.download_path.clone();
+                        let game_path = self.game_path.clone();
+                        let cache_manager = cache::CacheManager::new(download_path, game_path);
 
-                            tokio::spawn(async move {
-                                match cache_manager.clean_cache(tx.clone()).await {
-                                    Ok(size_mb) => {
-                                        info!("Limpeza de cache concluída com sucesso");
-                                        let _ = tx.send(
-                                            LauncherMessage::SetTempMessage(format!(
+                        tokio::spawn(async move {
+                            match cache_manager.clean_cache(tx.clone()).await {
+                                Ok(size_mb) => {
+                                    info!("Limpeza de cache concluída com sucesso");
+                                    let _ = tx.send(LauncherMessage::SetTempMessage(format!(
                                         "Cache limpo com sucesso! ({:.2} MB liberados)",
                                         size_mb
-                                    )),
-                                        );
-                                    }
-                                    Err(e) => {
-                                        info!("Erro durante limpeza de cache: {}", e);
-                                        let _ = tx.send(LauncherMessage::SetStatus(
-                                            format!("Erro ao limpar cache: {}", e),
-                                        ));
-                                        let _ = tx.send(
-                                            LauncherMessage::SetProcessing(false),
-                                        );
-                                    }
+                                    )));
                                 }
-                            });
-                        }
-                    },
-                );
+                                Err(e) => {
+                                    info!("Erro durante limpeza de cache: {}", e);
+                                    let _ = tx.send(LauncherMessage::SetStatus(format!(
+                                        "Erro ao limpar cache: {}",
+                                        e
+                                    )));
+                                    let _ = tx.send(LauncherMessage::SetProcessing(false));
+                                }
+                            }
+                        });
+                    }
+                });
             });
         }
     }
@@ -575,9 +590,9 @@ impl GameLauncher {
                                     .color(egui::Color32::from_rgb(180, 180, 180))
                                     .size(12.0),
                             );
-                            
+
                             ui.add_space(15.0);
-                            
+
                             // Versão do version.txt
                             if let Some(version) = &self.current_version {
                                 ui.label(
@@ -592,9 +607,9 @@ impl GameLauncher {
                                         .size(12.0),
                                 );
                             }
-                            
+
                             ui.add_space(15.0);
-                            
+
                             // Versão do client.exe
                             if let Some(client_ver) = &self.client_version {
                                 ui.label(

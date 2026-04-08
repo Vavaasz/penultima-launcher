@@ -1,935 +1,616 @@
-use crate::constants::*;
-use crate::tokio::sync::mpsc;
-use crate::client_version::ClientVersionManager;
-use crate::LauncherMessage;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use futures_util::StreamExt;
-use glob::glob;
 use log::info;
-use reqwest;
-use reqwest::Error;
-use semver::Version;
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::io::{BufReader, Read, Write};
+use std::path::{Path, PathBuf};
 
+use crate::client_version::ClientVersionManager;
+use crate::constants::{
+    CLIENT_ASSET_MANIFEST_HASH_URL, CLIENT_ASSET_MANIFEST_URL, CLIENT_GITHUB_RAW_BASE_URL,
+    CLIENT_PACKAGE_MANIFEST_URL, CLIENT_PACKAGE_VERSION_URL, HTTP_REQUEST_TIMEOUT,
+};
+use crate::message_system::LauncherMessage;
+use crate::tokio::sync::mpsc;
 
-/// Estrutura para gerenciar as operações de atualização do jogo
+#[derive(Clone, Debug, Deserialize)]
+struct PackageManifest {
+    version: String,
+    #[serde(default)]
+    files: Vec<PackageFile>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct PackageFile {
+    url: String,
+    localfile: String,
+    #[serde(default)]
+    packedhash: Option<String>,
+    #[serde(default)]
+    packedsize: Option<u64>,
+    #[serde(default)]
+    unpackedhash: Option<String>,
+    #[serde(default)]
+    unpackedsize: Option<u64>,
+    #[serde(default)]
+    unpack: Option<bool>,
+}
+
+impl PackageFile {
+    fn should_unpack(&self) -> bool {
+        self.unpack.unwrap_or(self.url.ends_with(".lzma"))
+    }
+
+    fn target_path(&self, game_path: &Path) -> PathBuf {
+        game_path.join(&self.localfile)
+    }
+}
+
+struct RemoteMetadata {
+    package_raw: String,
+    package_manifest: PackageManifest,
+    package_version: String,
+    assets_raw: String,
+    assets_hash: String,
+}
+
 pub struct UpdateManager {
-    /// Caminho para o diretório base da aplicação
-    base_dir: PathBuf,
-    /// Caminho para o diretório de download
     download_path: PathBuf,
-    /// Caminho para o diretório do jogo
     game_path: PathBuf,
 }
 
 impl UpdateManager {
-    /// Cria uma nova instância do UpdateManager
     pub fn new(download_path: PathBuf, game_path: PathBuf) -> Self {
-        // Obtém o diretório pai do download_path como base_dir
-        let base_dir = download_path.parent()
-            .unwrap_or(&download_path)
-            .to_path_buf();
-        
         Self {
-            base_dir,
             download_path,
             game_path,
         }
     }
 
-    /// Faz backup dos arquivos importantes para um diretório específico
-    fn backup_important_files_to(&self, backup_dir: &PathBuf) -> Result<()> {
-        fs::create_dir_all(&backup_dir)?;
-
-        info!("Fazendo backup em: {:?}", backup_dir);
-
-        // 1. Backup do clientoptions.json
-        let conf_dir = self.game_path.join("UltimaOT").join("conf");
-        let client_options = conf_dir.join("clientoptions.json");
-
-        info!("Verificando arquivo de configuração: {:?}", client_options);
-
-        if client_options.exists() {
-            info!("Arquivo de configuração encontrado, fazendo backup...");
-            let backup_conf_dir = backup_dir.join("conf");
-            fs::create_dir_all(&backup_conf_dir)?;
-
-            let target_path = backup_conf_dir.join("clientoptions.json");
-            info!("Copiando de {:?} para {:?}", client_options, target_path);
-
-            match fs::copy(&client_options, &target_path) {
-                Ok(bytes) => info!("Backup de clientoptions.json concluído: {} bytes", bytes),
-                Err(e) => {
-                    info!("Erro ao copiar clientoptions.json: {}", e);
-                    // Continuar mesmo em caso de erro neste arquivo
-                }
-            }
-        } else {
-            info!("Arquivo de configuração não encontrado em: {:?}", client_options);
-        }
-
-        // 2. Backup do settings.json (novo)
-        let settings_file = self.game_path.join("settings.json");
-        info!("Verificando arquivo de configurações globais: {:?}", settings_file);
-
-        if settings_file.exists() {
-            info!("Arquivo de configurações globais encontrado, fazendo backup...");
-
-            let target_path = backup_dir.join("settings.json");
-            info!("Copiando de {:?} para {:?}", settings_file, target_path);
-
-            match fs::copy(&settings_file, &target_path) {
-                Ok(bytes) => info!("Backup de settings.json concluído: {} bytes", bytes),
-                Err(e) => {
-                    info!("Erro ao copiar settings.json: {}", e);
-                    // Continuar mesmo em caso de erro neste arquivo
-                }
-            }
-        } else {
-            info!("Arquivo de configurações globais não encontrado em: {:?}", settings_file);
-        }
-
-        // 3. Backup do diretório characterdata
-        let char_data_dir = self.game_path.join("UltimaOT").join("characterdata");
-        info!("Verificando diretório de personagens: {:?}", char_data_dir);
-
-        if char_data_dir.exists() {
-            info!("Diretório de personagens encontrado, fazendo backup...");
-            let backup_char_dir = backup_dir.join("characterdata");
-
-            if backup_char_dir.exists() {
-                info!("Removendo diretório de backup antigo: {:?}", backup_char_dir);
-                fs::remove_dir_all(&backup_char_dir)?;
-            }
-
-            fs::create_dir_all(&backup_char_dir)?;
-
-            // Copiar todo o conteúdo do diretório characterdata
-            match fs::read_dir(&char_data_dir) {
-                Ok(entries) => {
-                    for entry_result in entries {
-                        match entry_result {
-                            Ok(entry) => {
-                                let path = entry.path();
-                                if path.is_file() {
-                                    let file_name = path.file_name().unwrap();
-                                    let target_path = backup_char_dir.join(file_name);
-
-                                    info!("Copiando {:?} para {:?}", path, target_path);
-
-                                    match fs::copy(&path, &target_path) {
-                                        Ok(bytes) => info!("Arquivo copiado: {} bytes", bytes),
-                                        Err(e) => {
-                                            info!("Erro ao copiar arquivo {:?}: {}", path, e);
-                                            // Continue mesmo com erro em um arquivo
-                                        }
-                                    }
-                                }
-                            },
-                            Err(e) => {
-                                info!("Erro ao ler entrada do diretório: {}", e);
-                            }
-                        }
-                    }
-                    info!("Backup de diretório de personagens concluído");
-                },
-                Err(e) => {
-                    info!("Erro ao ler diretório de personagens: {}", e);
-                    // Continuar mesmo em caso de erro
-                }
-            }
-        } else {
-            info!("Diretório de personagens não encontrado em: {:?}", char_data_dir);
-        }
-
-        // 4. Backup do diretório minimap
-        let minimap_dir = self.game_path.join("UltimaOT").join("minimap");
-        info!("Verificando diretório de minimap: {:?}", minimap_dir);
-
-        if minimap_dir.exists() {
-            info!("Diretório de minimap encontrado, fazendo backup...");
-            let backup_minimap_dir = backup_dir.join("minimap");
-
-            if backup_minimap_dir.exists() {
-                info!("Removendo diretório de backup antigo: {:?}", backup_minimap_dir);
-                fs::remove_dir_all(&backup_minimap_dir)?;
-            }
-
-            fs::create_dir_all(&backup_minimap_dir)?;
-
-            // Copiar todo o conteúdo do diretório minimap
-            match fs::read_dir(&minimap_dir) {
-                Ok(entries) => {
-                    for entry_result in entries {
-                        match entry_result {
-                            Ok(entry) => {
-                                let path = entry.path();
-                                if path.is_file() {
-                                    let file_name = path.file_name().unwrap();
-                                    let target_path = backup_minimap_dir.join(file_name);
-
-                                    info!("Copiando {:?} para {:?}", path, target_path);
-
-                                    match fs::copy(&path, &target_path) {
-                                        Ok(bytes) => info!("Arquivo copiado: {} bytes", bytes),
-                                        Err(e) => {
-                                            info!("Erro ao copiar arquivo {:?}: {}", path, e);
-                                            // Continue mesmo com erro em um arquivo
-                                        }
-                                    }
-                                }
-                            },
-                            Err(e) => {
-                                info!("Erro ao ler entrada do diretório: {}", e);
-                            }
-                        }
-                    }
-                    info!("Backup de diretório de minimap concluído");
-                },
-                Err(e) => {
-                    info!("Erro ao ler diretório de minimap: {}", e);
-                    // Continuar mesmo em caso de erro
-                }
-            }
-        } else {
-            info!("Diretório de minimap não encontrado em: {:?}", minimap_dir);
-        }
-
-        info!("Processo de backup concluído com sucesso");
-        Ok(())
-    }
-
-    /// Restaura os arquivos importantes de um diretório específico
-    fn restore_important_files_from(&self, backup_dir: &PathBuf) -> Result<()> {
-        info!("Restaurando arquivos de: {:?}", backup_dir);
-
-        if !backup_dir.exists() {
-            info!("Diretório de backup não encontrado: {:?}", backup_dir);
-            return Ok(());
-        }
-
-        // 1. Restaurar clientoptions.json
-        let backup_client_options = backup_dir.join("conf").join("clientoptions.json");
-        info!("Verificando backup de configuração: {:?}", backup_client_options);
-
-        if backup_client_options.exists() {
-            let conf_dir = self.game_path.join("UltimaOT").join("conf");
-            info!("Criando diretório de configuração: {:?}", conf_dir);
-            fs::create_dir_all(&conf_dir)?;
-
-            let target_path = conf_dir.join("clientoptions.json");
-            info!("Restaurando de {:?} para {:?}", backup_client_options, target_path);
-
-            match fs::copy(&backup_client_options, &target_path) {
-                Ok(bytes) => info!("Restauração de clientoptions.json concluída: {} bytes", bytes),
-                Err(e) => {
-                    info!("Erro ao restaurar clientoptions.json: {}", e);
-                    // Continuar mesmo em caso de erro
-                }
-            }
-        } else {
-            info!("Backup de configuração não encontrado");
-        }
-
-        // 2. Restaurar settings.json (novo)
-        let backup_settings = backup_dir.join("settings.json");
-        info!("Verificando backup de configurações globais: {:?}", backup_settings);
-
-        if backup_settings.exists() {
-            let target_path = self.game_path.join("settings.json");
-            info!("Restaurando de {:?} para {:?}", backup_settings, target_path);
-
-            match fs::copy(&backup_settings, &target_path) {
-                Ok(bytes) => info!("Restauração de settings.json concluída: {} bytes", bytes),
-                Err(e) => {
-                    info!("Erro ao restaurar settings.json: {}", e);
-                    // Continuar mesmo em caso de erro
-                }
-            }
-        } else {
-            info!("Backup de configurações globais não encontrado");
-        }
-
-        // 3. Restaurar diretório characterdata
-        let backup_char_dir = backup_dir.join("characterdata");
-        info!("Verificando backup de personagens: {:?}", backup_char_dir);
-
-        if backup_char_dir.exists() {
-            let char_data_dir = self.game_path.join("UltimaOT").join("characterdata");
-            info!("Criando diretório de personagens: {:?}", char_data_dir);
-            fs::create_dir_all(&char_data_dir)?;
-
-            // Copiar todo o conteúdo do diretório characterdata de volta
-            match fs::read_dir(&backup_char_dir) {
-                Ok(entries) => {
-                    for entry_result in entries {
-                        match entry_result {
-                            Ok(entry) => {
-                                let path = entry.path();
-                                if path.is_file() {
-                                    let file_name = path.file_name().unwrap();
-                                    let target_path = char_data_dir.join(file_name);
-
-                                    info!("Restaurando {:?} para {:?}", path, target_path);
-
-                                    match fs::copy(&path, &target_path) {
-                                        Ok(bytes) => info!("Arquivo restaurado: {} bytes", bytes),
-                                        Err(e) => {
-                                            info!("Erro ao restaurar arquivo {:?}: {}", path, e);
-                                            // Continue mesmo com erro em um arquivo
-                                        }
-                                    }
-                                }
-                            },
-                            Err(e) => {
-                                info!("Erro ao ler entrada do diretório de backup: {}", e);
-                            }
-                        }
-                    }
-                    info!("Restauração de diretório de personagens concluída");
-                },
-                Err(e) => {
-                    info!("Erro ao ler diretório de backup de personagens: {}", e);
-                    // Continuar mesmo em caso de erro
-                }
-            }
-        } else {
-            info!("Backup de diretório de personagens não encontrado");
-        }
-
-        // 4. Restaurar diretório minimap (preservando novos arquivos)
-        let backup_minimap_dir = backup_dir.join("minimap");
-        info!("Verificando backup de minimap: {:?}", backup_minimap_dir);
-
-        if backup_minimap_dir.exists() {
-            let minimap_dir = self.game_path.join("UltimaOT").join("minimap");
-            info!("Verificando diretório de minimap: {:?}", minimap_dir);
-            
-            // Criar diretório se não existir
-            fs::create_dir_all(&minimap_dir)?;
-
-            // Copiar arquivos do backup sobre os novos (preserva novos arquivos, sobrescreve existentes)
-            match fs::read_dir(&backup_minimap_dir) {
-                Ok(entries) => {
-                    for entry_result in entries {
-                        match entry_result {
-                            Ok(entry) => {
-                                let path = entry.path();
-                                if path.is_file() {
-                                    let file_name = path.file_name().unwrap();
-                                    let target_path = minimap_dir.join(file_name);
-
-                                    if target_path.exists() {
-                                        info!("Sobrescrevendo arquivo existente: {:?}", target_path);
-                                    } else {
-                                        info!("Restaurando arquivo: {:?}", target_path);
-                                    }
-
-                                    match fs::copy(&path, &target_path) {
-                                        Ok(bytes) => info!("Arquivo processado: {} bytes", bytes),
-                                        Err(e) => {
-                                            info!("Erro ao processar arquivo {:?}: {}", path, e);
-                                            // Continue mesmo com erro em um arquivo
-                                        }
-                                    }
-                                }
-                            },
-                            Err(e) => {
-                                info!("Erro ao ler entrada do diretório de backup: {}", e);
-                            }
-                        }
-                    }
-                    info!("Restauração de diretório de minimap concluída (novos arquivos preservados)");
-                },
-                Err(e) => {
-                    info!("Erro ao ler diretório de backup de minimap: {}", e);
-                    // Continuar mesmo em caso de erro
-                }
-            }
-        } else {
-            info!("Backup de diretório de minimap não encontrado - mantendo arquivos da nova versão");
-        }
-
-        info!("Processo de restauração concluído com sucesso");
-        Ok(())
-    }
-
-    /// Busca a versão mais recente no GitHub
-    async fn fetch_github_version() -> Result<String> {
-        info!("Iniciando verificação de versão no GitHub...");
-        let url = GITHUB_VERSION_URL;
-        info!("Conectando a: {}", url);
-
-        // Criar um cliente com timeout
-        let client = reqwest::Client::builder()
-            .timeout(HTTP_REQUEST_TIMEOUT)
-            .build()?;
-
-        // Fazer a requisição
-        match client.get(url).send().await {
-            Ok(response) => {
-                let status = response.status();
-                info!("Status HTTP: {}", status);
-
-                if status.is_success() {
-                    match response.text().await {
-                        Ok(version) => {
-                            let version = version.trim().to_string();
-                            info!("Versão no GitHub: {}", version);
-                            Ok(version)
-                        }
-                        Err(e) => {
-                            info!("Erro ao ler resposta: {}", e);
-                            Err(anyhow::anyhow!("Erro ao ler resposta do servidor: {}", e))
-                        }
-                    }
-                } else {
-                    info!("Resposta HTTP não foi bem-sucedida: {}", status);
-                    Err(anyhow::anyhow!(
-                        "Erro ao verificar versão: Servidor retornou {}",
-                        status
-                    ))
-                }
-            }
-            Err(e) => {
-                // Tratamento específico para timeout e outros erros de conexão
-                if e.is_timeout() {
-                    info!("Timeout na conexão com o servidor");
-                    Err(anyhow::anyhow!(
-                        "Tempo de conexão esgotado. Verifique sua internet."
-                    ))
-                } else if e.is_connect() {
-                    info!("Falha na conexão com o servidor: {}", e);
-                    Err(anyhow::anyhow!(
-                        "Não foi possível se conectar ao servidor. Verifique sua internet."
-                    ))
-                } else {
-                    info!("Erro na requisição: {}", e);
-                    Err(anyhow::anyhow!("Erro ao verificar versão: {}", e))
-                }
-            }
-        }
-    }
-
-    /// Carrega a versão atual do jogo
     pub fn load_current_version(game_path: &PathBuf) -> Result<String> {
+        let package_version_path = game_path.join("package.json.version");
+        if package_version_path.exists() {
+            let version = fs::read_to_string(package_version_path)?;
+            return Ok(version.trim().to_string());
+        }
+
         let version_file = game_path.join("version.txt");
         if version_file.exists() {
-            let mut content = String::new();
-            File::open(version_file)?.read_to_string(&mut content)?;
-            Ok(content.trim().to_string())
-        } else {
-            Ok("0.0.0".to_string())
+            let version = fs::read_to_string(version_file)?;
+            return Ok(version.trim().to_string());
         }
+
+        let package_manifest_path = game_path.join("package.json");
+        if package_manifest_path.exists() {
+            let manifest: PackageManifest =
+                serde_json::from_str(&fs::read_to_string(package_manifest_path)?)?;
+            return Ok(manifest.version);
+        }
+
+        Ok("0.0.0".to_string())
     }
 
-    /// Verifica se a versão atual precisa ser atualizada
-    pub fn version_needs_update(current: &str, latest: &str) -> bool {
-        match (Version::parse(current), Version::parse(latest)) {
-            (Ok(current), Ok(latest)) => latest > current,
-            _ => true, // Se não conseguir parsear alguma versão, assume que precisa atualizar
+    pub async fn check_initial_updates(game_path: &PathBuf) -> Result<bool, reqwest::Error> {
+        info!("Verificando cliente declarado em: {:?}", game_path);
+
+        if let Err(error) = fs::create_dir_all(game_path) {
+            info!("Falha ao garantir diretório do jogo: {}", error);
+            return Ok(true);
         }
+
+        let client_exists = game_path.join("bin").join("client.exe").exists();
+        if !client_exists {
+            info!("client.exe não encontrado. Atualização necessária.");
+            return Ok(true);
+        }
+
+        let package_raw = match fetch_text(CLIENT_PACKAGE_MANIFEST_URL).await {
+            Ok(text) => text,
+            Err(error) => {
+                info!("Falha ao obter package.json remoto: {}", error);
+                return Ok(false);
+            }
+        };
+
+        let remote_assets_hash = match fetch_text(CLIENT_ASSET_MANIFEST_HASH_URL).await {
+            Ok(text) => text,
+            Err(error) => {
+                info!("Falha ao obter assets.json.sha256 remoto: {}", error);
+                return Ok(false);
+            }
+        };
+
+        let local_package = fs::read_to_string(game_path.join("package.json")).unwrap_or_default();
+        let local_assets_hash =
+            fs::read_to_string(game_path.join("assets.json.sha256")).unwrap_or_default();
+
+        Ok(local_package.trim() != package_raw.trim()
+            || local_assets_hash.trim() != remote_assets_hash.trim())
     }
 
-    /// Verifica se há atualizações disponíveis para o jogo
     pub async fn check_for_updates(
         &self,
         message_sender: mpsc::UnboundedSender<LauncherMessage>,
         disable_auto_start: bool,
     ) -> Result<()> {
-        // Atualizar o status para indicar o início da verificação
-        message_sender.send(LauncherMessage::SetStatus(
-            "Verificando atualizações...".to_string(),
-        ))?;
-        message_sender.send(LauncherMessage::SetProcessing(true))?;
-        message_sender.send(LauncherMessage::DownloadProgress(0.2))?; // Progresso inicial
-
-        info!("Buscando versão mais recente...");
-        // Buscar versão do GitHub
-        let latest_version = match Self::fetch_github_version().await {
-            Ok(version) => version,
-            Err(e) => {
-                info!("Erro ao buscar versão: {}", e);
-                message_sender.send(LauncherMessage::SetStatus(format!(
-                    "Erro ao verificar versão: {}",
-                    e
-                )))?;
-                message_sender.send(LauncherMessage::SetProcessing(false))?;
-                return Err(e);
-            }
-        };
-
-        message_sender.send(LauncherMessage::SetStatus(format!(
-            "Versão mais recente: {}",
-            latest_version
-        )))?;
-        message_sender.send(LauncherMessage::DownloadProgress(0.4))?;
-
-        info!("Verificando versão local...");
-        // Obter versão local
-        let current_version =
-            if let Ok(content) = fs::read_to_string(self.game_path.join("version.txt")) {
-                content.trim().to_string()
-            } else {
-                info!("Arquivo de versão não encontrado, usando 0.0.0");
-                "0.0.0".to_string()
-            };
-
-        info!(
-            "Versão atual: {}, Versão mais recente: {}",
-            current_version, latest_version
-        );
-        message_sender.send(LauncherMessage::VersionUpdated(current_version.clone()))?;
-        message_sender.send(LauncherMessage::DownloadProgress(0.6))?;
-
-        // Comparar versões
-        if Self::version_needs_update(&current_version, &latest_version) {
-            info!("Atualização necessária. Iniciando download...");
-            message_sender.send(LauncherMessage::SetStatus(format!(
-                "Nova versão disponível: {} para {}",
-                current_version, latest_version
-            )))?;
-            message_sender.send(LauncherMessage::DownloadProgress(0.8))?;
-
-            // Pequena pausa para que o usuário veja a mensagem
-            tokio::time::sleep(UI_MESSAGE_DISPLAY_DURATION).await;
-
-            // Iniciar download
-            self.download_release(
-                &get_github_download_url(&latest_version),
-                &latest_version,
-                message_sender.clone(),
-                disable_auto_start,
-            ).await?;
-        } else {
-            info!("O jogo já está atualizado.");
-            message_sender.send(LauncherMessage::SetStatus(format!(
-                "Jogo já está na versão mais recente ({})",
-                current_version
-            )))?;
-            message_sender.send(LauncherMessage::DownloadProgress(1.0))?;
-
-            // Pequena pausa para o usuário ver a mensagem
-            tokio::time::sleep(UI_MESSAGE_DISPLAY_DURATION).await;
-
-            message_sender.send(LauncherMessage::SetStatus("Pronto para jogar".to_string()))?;
-            message_sender.send(LauncherMessage::SetProcessing(false))?;
-        }
-
-        Ok(())
+        self.run_update(message_sender, disable_auto_start, false)
+            .await
     }
 
-    /// Força a atualização do jogo, limpando diretórios e baixando tudo novamente
     pub async fn force_refresh(
         &self,
         message_sender: mpsc::UnboundedSender<LauncherMessage>,
         disable_auto_start: bool,
     ) -> Result<()> {
-        message_sender.send(LauncherMessage::SetStatus(
-            "Fazendo backup dos arquivos importantes...".to_string(),
-        ))?;
-
-        // Backup temporário em diretório fora da pasta de downloads
-        let temp_backup_dir = self.base_dir.join("temp_backup");
-
-        // Fazer backup dos arquivos importantes
-        if let Err(e) = self.backup_important_files_to(&temp_backup_dir) {
-            info!("Erro ao fazer backup dos arquivos: {}", e);
-            message_sender.send(LauncherMessage::SetStatus(
-                format!("Erro ao fazer backup dos arquivos: {}", e),
-            ))?;
-            return Err(e.into());
-        }
-
-        message_sender.send(LauncherMessage::SetStatus(
-            "Limpando diretórios...".to_string(),
-        ))?;
-
-        // Limpar diretório de download preservando o backup
-        if self.download_path.exists() {
-            info!("Limpando diretório de download: {:?}", self.download_path);
-            fs::remove_dir_all(&self.download_path)?;
-            fs::create_dir_all(&self.download_path)?;
-        }
-
-        // Limpar diretório do jogo
-        if self.game_path.exists() {
-            info!("Limpando diretório do jogo: {:?}", self.game_path);
-            fs::remove_dir_all(&self.game_path)?;
-            fs::create_dir_all(&self.game_path)?;
-        }
-
-        message_sender.send(LauncherMessage::SetStatus(
-            "Iniciando download limpo...".to_string(),
-        ))?;
-
-        // Chamar check_for_updates para baixar tudo novamente
-        let result = self.check_for_updates(message_sender.clone(), disable_auto_start).await;
-
-        // // Buscar versão mais recente do GitHub
-        // let latest_version = match Self::fetch_github_version().await {
-        //     Ok(version) => version,
-        //     Err(e) => {
-        //         info!("Erro ao buscar versão: {}", e);
-        //         message_sender.send(LauncherMessage::SetStatus(format!(
-        //             "Erro ao verificar versão: {}",
-        //             e
-        //         )))?;
-        //         message_sender.send(LauncherMessage::SetProcessing(false))?;
-        //         return Err(e.into());
-        //     }
-        // };
-
-        // message_sender.send(LauncherMessage::SetStatus(format!(
-        //     "Forçando download da versão: {}",
-        //     latest_version
-        // )))?;
-
-        // // Forçar download independentemente da versão local
-        // let result = self.download_release(
-        //     &format!(
-        //         "https://github.com/vavasz/Ultima-Launcher/releases/download/{}/UltimaOT.zip",
-        //         latest_version
-        //     ),
-        //     &latest_version,
-        //     message_sender.clone(),
-        //     disable_auto_start,
-        // ).await;
-
-        // Restaurar arquivos importantes após a atualização
-        message_sender.send(LauncherMessage::SetStatus(
-            "Restaurando arquivos importantes...".to_string(),
-        ))?;
-
-        if let Err(e) = self.restore_important_files_from(&temp_backup_dir) {
-            info!("Erro ao restaurar arquivos: {}", e);
-            message_sender.send(LauncherMessage::SetStatus(
-                format!("Erro ao restaurar arquivos: {}", e),
-            ))?;
-            return Err(e.into());
-        }
-
-        // Limpar o backup temporário
-        if temp_backup_dir.exists() {
-            if let Err(e) = fs::remove_dir_all(&temp_backup_dir) {
-                info!("Aviso: Erro ao remover diretório de backup temporário: {}", e);
-            }
-        }
-
-        result
+        self.run_update(message_sender, disable_auto_start, true)
+            .await
     }
 
-    /// Baixa e instala uma versão do jogo
-    pub async fn download_release(
+    async fn run_update(
         &self,
-        url: &str,
-        version: &str,
         message_sender: mpsc::UnboundedSender<LauncherMessage>,
         disable_auto_start: bool,
+        force: bool,
     ) -> Result<()> {
-        message_sender.send(LauncherMessage::SetProcessing(true))?;
+        send_message(
+            &message_sender,
+            LauncherMessage::SetStatus("Verificando arquivos do cliente...".to_string()),
+        )?;
+        send_message(&message_sender, LauncherMessage::SetProcessing(true))?;
+        send_message(&message_sender, LauncherMessage::DownloadProgress(0.0))?;
 
-        // Backup temporário em diretório fora da pasta de downloads
-        let temp_backup_dir = self.base_dir.join("temp_backup");
-        
-        // Fazer backup dos arquivos importantes antes do download
-        message_sender.send(LauncherMessage::SetStatus(
-            "Fazendo backup dos arquivos importantes...".to_string(),
-        ))?;
-        
-        if let Err(e) = self.backup_important_files_to(&temp_backup_dir) {
-            info!("Erro ao fazer backup dos arquivos: {}", e);
-            message_sender.send(LauncherMessage::SetStatus(
-                format!("Erro ao fazer backup dos arquivos: {}", e),
-            ))?;
-            return Err(e.into());
-        }
+        let remote = self.fetch_remote_metadata().await?;
+        let local_package = fs::read_to_string(self.package_manifest_path()).unwrap_or_default();
+        let local_assets_hash =
+            fs::read_to_string(self.asset_manifest_hash_path()).unwrap_or_default();
 
-        message_sender.send(LauncherMessage::SetStatus(
-            "Iniciando download...".to_string(),
-        ))?;
-        message_sender.send(LauncherMessage::DownloadProgress(0.0))?;
+        let package_changed = force || local_package.trim() != remote.package_raw.trim();
+        let assets_changed = force || local_assets_hash.trim() != remote.assets_hash.trim();
 
-        info!("Iniciando download de: {}", url);
-
-        // Criar cliente HTTP
-        let client = reqwest::Client::new();
-
-        // Iniciar download
-        let res = client
-            .get(url)
-            .send()
-            .await
-            .context("Falha ao fazer requisição HTTP")?;
-
-        if !res.status().is_success() {
-            return Err(anyhow::anyhow!("Erro no download: Status {}", res.status()));
-        }
-
-        let total_size = res.content_length().unwrap_or(0);
-        info!("Tamanho total do arquivo: {} bytes", total_size);
-
-        // Preparar arquivo de saída
-        let zip_path = self.download_path.join(format!("game-{}.zip", version));
-        info!("Salvando arquivo em: {:?}", zip_path);
-
-        let mut file = File::create(&zip_path).context("Falha ao criar arquivo zip")?;
-
-        let mut downloaded = 0u64;
-
-        // Stream do download
-        let mut stream = res.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.context("Falha ao ler chunk do download")?;
-            file.write_all(&chunk)
-                .context("Falha ao escrever chunk no arquivo")?;
-            downloaded += chunk.len() as u64;
-
-            if total_size > 0 {
-                let progress = (downloaded as f32 / total_size as f32).min(1.0);
-                message_sender.send(LauncherMessage::DownloadProgress(progress))?;
-                message_sender.send(LauncherMessage::SetStatus(format!(
-                    "Baixando... {:.1}%",
-                    progress * 100.0
-                )))?;
-            }
-        }
-
-        // Garantir que o arquivo foi escrito completamente
-        file.flush()
-            .context("Falha ao finalizar escrita do arquivo")?;
-        drop(file);
-
-        info!("Download completo. Tamanho baixado: {} bytes", downloaded);
-        message_sender
-            .send(LauncherMessage::SetStatus(
-                "Verificando arquivo...".to_string(),
-            ))
-            .context("Falha ao enviar status de verificação")?;
-
-        // Verificar se o arquivo zip é válido
-        let file = File::open(&zip_path).context("Falha ao abrir arquivo zip para verificação")?;
-        let archive = zip::ZipArchive::new(file).context("Arquivo zip inválido")?;
-        info!("Arquivo zip válido com {} arquivos", archive.len());
-        drop(archive);
-
-        message_sender
-            .send(LauncherMessage::SetStatus(
-                "Extraindo arquivos...".to_string(),
-            ))
-            .context("Falha ao enviar status de extração")?;
-
-        // Extrair o arquivo ZIP
-        message_sender.send(LauncherMessage::SetStatus(
-            "Preparando extração...".to_string(),
-        ))?;
-
-        let total_files = {
-            let zip_file_temp =
-                File::open(&zip_path).context("Falha ao abrir arquivo ZIP para contagem")?;
-            let archive_temp = zip::ZipArchive::new(zip_file_temp)
-                .context("Falha ao ler arquivo ZIP para contagem")?;
-            archive_temp.len()
+        let files_to_update = if force || package_changed {
+            self.collect_changed_files(&remote.package_manifest, force)?
+        } else {
+            Vec::new()
         };
 
-        message_sender.send(LauncherMessage::SetStatus(format!(
-            "Extraindo {} arquivos...",
-            total_files
-        )))?;
-
-        let zip_file = File::open(&zip_path).context("Falha ao abrir arquivo ZIP")?;
-        let mut archive = zip::ZipArchive::new(zip_file).context("Falha ao ler arquivo ZIP")?;
-
-        // Criar diretório de extração
-        fs::create_dir_all(&self.game_path).context("Falha ao criar diretório de extração")?;
-
-        // Extrair todos os arquivos
-        for i in 0..archive.len() {
-            let mut file = archive
-                .by_index(i)
-                .context("Falha ao acessar arquivo no ZIP")?;
-            let outpath = self.game_path.join(file.name());
-
-            // Atualizar progresso a cada 10 arquivos
-            if i % 10 == 0 {
-                let progress = (i as f32 / total_files as f32).min(1.0);
-                message_sender.send(LauncherMessage::DownloadProgress(progress))?;
-                message_sender.send(LauncherMessage::SetStatus(format!(
-                    "Extraindo arquivo {}/{}...",
-                    i + 1,
-                    total_files
-                )))?;
-            }
-
-            if file.name().ends_with('/') {
-                fs::create_dir_all(&outpath).context("Falha ao criar diretório de extração")?;
-            } else {
-                if let Some(p) = outpath.parent() {
-                    if !p.exists() {
-                        fs::create_dir_all(p).context("Falha ao criar diretório pai")?;
-                    }
-                }
-                let mut outfile =
-                    File::create(&outpath).context("Falha ao criar arquivo de saída")?;
-                std::io::copy(&mut file, &mut outfile).context("Falha ao extrair arquivo")?;
-            }
+        if files_to_update.is_empty() && !assets_changed {
+            info!("Cliente já está sincronizado com o manifesto remoto");
+            self.persist_metadata(&remote)?;
+            self.refresh_versions(&message_sender, &remote.package_version)?;
+            send_message(
+                &message_sender,
+                LauncherMessage::SetStatus(format!(
+                    "Cliente já está atualizado ({})",
+                    remote.package_version
+                )),
+            )?;
+            send_message(&message_sender, LauncherMessage::DownloadProgress(1.0))?;
+            send_message(&message_sender, LauncherMessage::SetProcessing(false))?;
+            return Ok(());
         }
 
-        // Após extrair todos os arquivos e antes de limpar o zip, restaurar os arquivos importantes
-        message_sender.send(LauncherMessage::SetStatus(
-            "Restaurando arquivos importantes...".to_string(),
-        ))?;
-
-        if let Err(e) = self.restore_important_files_from(&temp_backup_dir) {
-            info!("Erro ao restaurar arquivos: {}", e);
-            message_sender.send(LauncherMessage::SetStatus(
-                format!("Erro ao restaurar arquivos: {}", e),
-            ))?;
-            return Err(e.into());
-        }
-
-        // Limpar arquivo zip após extração
-        fs::remove_file(&zip_path).context("Falha ao remover arquivo zip temporário")?;
-
-        // Salvar nova versão
-        fs::write(self.game_path.join("version.txt"), &version)?;
-
-        message_sender
-            .send(LauncherMessage::VersionUpdated(version.to_string()))
-            .context("Falha ao enviar versão")?;
-        message_sender
-            .send(LauncherMessage::SetStatus(
-                "Download concluído!".to_string(),
-            ))
-            .context("Falha ao enviar status final")?;
-        message_sender
-            .send(LauncherMessage::DownloadProgress(1.0))
-            .context("Falha ao enviar progresso final")?;
-        message_sender.send(LauncherMessage::SetProcessing(false))?;
-        message_sender.send(LauncherMessage::SetStatus(
-            "Atualização concluída. Pronto para jogar.".to_string(),
-        ))?;
-        message_sender.send(LauncherMessage::DownloadComplete)?;
-
-        // Verificar se o cliente foi extraído corretamente
-        let client_exe_pattern = format!("{}/*/bin/client.exe", self.game_path.display());
-        let client_exe_exists = glob(&client_exe_pattern)
-            .map(|entries| entries.filter_map(Result::ok).next().is_some())
-            .unwrap_or(false);
-
-        if client_exe_exists {
-            // Obter a versão real do cliente baixado
-            if let Some(client_version) = ClientVersionManager::load_client_version(&self.download_path, &self.game_path) {
-                // Enviar a versão do cliente atualizada
-                message_sender.send(LauncherMessage::ClientVersionUpdated(client_version))?;
-            } else {
-                // Fallback para a versão do GitHub se não conseguir ler do cliente
-                message_sender.send(LauncherMessage::ClientVersionUpdated(version.to_string()))?;
-            }
-            
-            message_sender.send(LauncherMessage::SetStatus(
-                "Atualização completa! Pronto para jogar.".to_string(),
-            ))?;
-
-            // Só iniciar automaticamente o jogo se disable_auto_start for false
-            if !disable_auto_start {
-                message_sender.send(LauncherMessage::LaunchGame)?;
-            }
+        if files_to_update.is_empty() {
+            send_message(
+                &message_sender,
+                LauncherMessage::SetStatus("Sincronizando manifestos do cliente...".to_string()),
+            )?;
         } else {
-            message_sender.send(LauncherMessage::Error(
-                "Atualização concluída, mas client.exe não foi encontrado!".to_string(),
-            ))?;
+            send_message(
+                &message_sender,
+                LauncherMessage::SetStatus(format!(
+                    "Atualizando {} arquivo(s) do cliente...",
+                    files_to_update.len()
+                )),
+            )?;
         }
 
-        info!("Processo de download e extração concluído com sucesso!");
+        for (index, file) in files_to_update.iter().enumerate() {
+            self.download_manifest_file(file, index + 1, files_to_update.len(), &message_sender)
+                .await?;
+        }
+
+        self.persist_metadata(&remote)?;
+        self.refresh_versions(&message_sender, &remote.package_version)?;
+
+        send_message(&message_sender, LauncherMessage::DownloadProgress(1.0))?;
+        send_message(
+            &message_sender,
+            LauncherMessage::SetStatus("Atualização concluída. Pronto para jogar.".to_string()),
+        )?;
+        send_message(&message_sender, LauncherMessage::SetProcessing(false))?;
+        send_message(&message_sender, LauncherMessage::DownloadComplete)?;
+
+        if !disable_auto_start {
+            send_message(&message_sender, LauncherMessage::LaunchGame)?;
+        }
+
         Ok(())
     }
 
-    pub async fn check_initial_updates(game_path: &PathBuf) -> Result<bool, Error> {
-        info!("Verificando arquivos do jogo em: {:?}", game_path);
+    async fn fetch_remote_metadata(&self) -> Result<RemoteMetadata> {
+        let package_raw = fetch_text(CLIENT_PACKAGE_MANIFEST_URL)
+            .await
+            .context("Falha ao baixar package.json")?;
+        let package_manifest: PackageManifest =
+            serde_json::from_str(&package_raw).context("package.json remoto inválido")?;
+        let package_version = fetch_text(CLIENT_PACKAGE_VERSION_URL)
+            .await
+            .context("Falha ao baixar package.json.version")?;
+        let assets_raw = fetch_text(CLIENT_ASSET_MANIFEST_URL)
+            .await
+            .context("Falha ao baixar assets.json")?;
+        let assets_hash = fetch_text(CLIENT_ASSET_MANIFEST_HASH_URL)
+            .await
+            .context("Falha ao baixar assets.json.sha256")?;
 
-        // Criar diretório do jogo se não existir
-        if !game_path.exists() {
-            info!("Diretório do jogo não existe. Criando...");
-            if let Err(e) = fs::create_dir_all(game_path) {
-                info!("Erro ao criar diretório do jogo: {}", e);
-                return Ok(true); // Precisa atualizar
+        Ok(RemoteMetadata {
+            package_raw,
+            package_manifest,
+            package_version: package_version.trim().to_string(),
+            assets_raw,
+            assets_hash: assets_hash.trim().to_string(),
+        })
+    }
+
+    fn collect_changed_files(
+        &self,
+        manifest: &PackageManifest,
+        force: bool,
+    ) -> Result<Vec<PackageFile>> {
+        let mut changed_files = Vec::new();
+
+        for file in &manifest.files {
+            if force || self.file_needs_update(file)? {
+                changed_files.push(file.clone());
             }
         }
 
-        // Verificar se os arquivos principais do jogo existem
-        let client_exe_pattern = format!("{}/*/bin/client.exe", game_path.display());
-        info!("Buscando client.exe com padrão: {}", client_exe_pattern);
+        Ok(changed_files)
+    }
 
-        let client_exe_exists = glob(&client_exe_pattern)
-            .map(|entries| {
-                let paths: Vec<_> = entries.filter_map(Result::ok).collect();
-                if !paths.is_empty() {
-                    info!("Encontrados {} arquivos client.exe:", paths.len());
-                    for (i, path) in paths.iter().enumerate() {
-                        info!("  [{}]: {}", i, path.display());
-                    }
-                    true
-                } else {
-                    info!("Nenhum client.exe encontrado");
-                    false
-                }
-            })
-            .unwrap_or_else(|e| {
-                info!("Erro ao buscar client.exe: {}", e);
-                false
-            });
-
-        if !client_exe_exists {
-            info!("Client.exe não encontrado. Atualização necessária.");
-            return Ok(true); // Precisa atualizar se não encontrar o cliente
+    fn file_needs_update(&self, file: &PackageFile) -> Result<bool> {
+        let target_path = file.target_path(&self.game_path);
+        if !target_path.exists() {
+            return Ok(true);
         }
 
-        // Buscar a versão mais recente do GitHub
-        info!("Verificando versão mais recente no GitHub...");
-        let latest_version_result = UpdateManager::fetch_github_version().await;
-
-        if let Err(e) = &latest_version_result {
-            info!("Erro ao buscar versão do GitHub: {}", e);
-            // Em caso de erro ao buscar, verificamos se pelo menos temos os arquivos locais
-            return Ok(!client_exe_exists);
-        }
-
-        let latest_version = latest_version_result.unwrap();
-
-        // Obter versão atual do arquivo version.txt local
-        let version_file_path = game_path.join("version.txt");
-        info!("Verificando arquivo de versão: {:?}", version_file_path);
-
-        let current_version = if version_file_path.exists() {
-            match fs::read_to_string(&version_file_path) {
-                Ok(content) => {
-                    let version = content.trim().to_string();
-                    info!("Versão atual lida do arquivo: {}", version);
-                    version
+        if file.should_unpack() {
+            if let Some(expected_size) = file.unpackedsize {
+                if target_path
+                    .metadata()
+                    .map(|meta| meta.len())
+                    .unwrap_or_default()
+                    != expected_size
+                {
+                    return Ok(true);
                 }
-                Err(e) => {
-                    info!("Erro ao ler arquivo de versão: {}", e);
-                    "0.0.0".to_string()
-                }
+            }
+
+            if let Some(expected_hash) = &file.unpackedhash {
+                return Ok(hash_file(&target_path)? != expected_hash.to_ascii_lowercase());
             }
         } else {
-            info!("Arquivo version.txt não encontrado.");
-            "0.0.0".to_string()
+            if let Some(expected_size) = file.packedsize {
+                if target_path
+                    .metadata()
+                    .map(|meta| meta.len())
+                    .unwrap_or_default()
+                    != expected_size
+                {
+                    return Ok(true);
+                }
+            }
+
+            if let Some(expected_hash) = &file.packedhash {
+                return Ok(hash_file(&target_path)? != expected_hash.to_ascii_lowercase());
+            }
+        }
+
+        Ok(false)
+    }
+
+    async fn download_manifest_file(
+        &self,
+        file: &PackageFile,
+        index: usize,
+        total: usize,
+        message_sender: &mpsc::UnboundedSender<LauncherMessage>,
+    ) -> Result<()> {
+        let target_path = file.target_path(&self.game_path);
+        let file_name = target_path
+            .file_name()
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_else(|| file.localfile.clone());
+        let packed_temp_path = temporary_path(
+            &target_path,
+            if file.should_unpack() {
+                "packed"
+            } else {
+                "download"
+            },
+        );
+        let unpacked_temp_path = temporary_path(&target_path, "part");
+
+        if let Some(parent) = target_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Falha ao criar diretório {}", parent.display()))?;
+        }
+
+        send_message(
+            message_sender,
+            LauncherMessage::SetStatus(format!("Atualizando {}/{}: {}", index, total, file_name)),
+        )?;
+
+        let progress = if total == 0 {
+            1.0
+        } else {
+            ((index - 1) as f32 / total as f32).min(0.99)
+        };
+        send_message(message_sender, LauncherMessage::DownloadProgress(progress))?;
+
+        download_to_path(&build_raw_url(&file.url), &packed_temp_path).await?;
+
+        if file.should_unpack() {
+            if let Some(expected_hash) = &file.packedhash {
+                verify_hash(&packed_temp_path, expected_hash)?;
+            }
+
+            if unpacked_temp_path.exists() {
+                fs::remove_file(&unpacked_temp_path)?;
+            }
+
+            let mut packed_file = BufReader::new(
+                File::open(&packed_temp_path)
+                    .with_context(|| format!("Falha ao abrir {}", packed_temp_path.display()))?,
+            );
+            let mut unpacked_file = File::create(&unpacked_temp_path).with_context(|| {
+                format!(
+                    "Falha ao criar arquivo temporário {}",
+                    unpacked_temp_path.display()
+                )
+            })?;
+            lzma_rs::lzma_decompress(&mut packed_file, &mut unpacked_file)
+                .context("Falha ao descompactar arquivo LZMA")?;
+            unpacked_file.flush()?;
+
+            if let Some(expected_hash) = &file.unpackedhash {
+                verify_hash(&unpacked_temp_path, expected_hash)?;
+            }
+
+            replace_file(&unpacked_temp_path, &target_path)?;
+            if packed_temp_path.exists() {
+                fs::remove_file(&packed_temp_path)?;
+            }
+        } else {
+            if let Some(expected_hash) = &file.packedhash {
+                verify_hash(&packed_temp_path, expected_hash)?;
+            }
+
+            replace_file(&packed_temp_path, &target_path)?;
+        }
+
+        Ok(())
+    }
+
+    fn persist_metadata(&self, remote: &RemoteMetadata) -> Result<()> {
+        fs::create_dir_all(&self.game_path)?;
+        fs::write(self.package_manifest_path(), &remote.package_raw)?;
+        fs::write(
+            self.package_version_path(),
+            format!("{}\n", remote.package_version),
+        )?;
+        fs::write(self.asset_manifest_path(), &remote.assets_raw)?;
+        fs::write(
+            self.asset_manifest_hash_path(),
+            format!("{}\n", remote.assets_hash),
+        )?;
+        fs::write(
+            self.game_path.join("version.txt"),
+            format!("{}\n", remote.package_version),
+        )?;
+        Ok(())
+    }
+
+    fn refresh_versions(
+        &self,
+        message_sender: &mpsc::UnboundedSender<LauncherMessage>,
+        version: &str,
+    ) -> Result<()> {
+        send_message(
+            message_sender,
+            LauncherMessage::VersionUpdated(version.to_string()),
+        )?;
+
+        if let Some(client_version) =
+            ClientVersionManager::load_client_version(&self.download_path, &self.game_path)
+        {
+            send_message(
+                message_sender,
+                LauncherMessage::ClientVersionUpdated(client_version),
+            )?;
+        } else {
+            send_message(
+                message_sender,
+                LauncherMessage::ClientVersionUpdated(version.to_string()),
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn package_manifest_path(&self) -> PathBuf {
+        self.game_path.join("package.json")
+    }
+
+    fn package_version_path(&self) -> PathBuf {
+        self.game_path.join("package.json.version")
+    }
+
+    fn asset_manifest_path(&self) -> PathBuf {
+        self.game_path.join("assets.json")
+    }
+
+    fn asset_manifest_hash_path(&self) -> PathBuf {
+        self.game_path.join("assets.json.sha256")
+    }
+}
+
+fn send_message(
+    sender: &mpsc::UnboundedSender<LauncherMessage>,
+    message: LauncherMessage,
+) -> Result<()> {
+    sender
+        .send(message)
+        .map_err(|error| anyhow!("Falha ao enviar mensagem para a UI: {}", error))
+}
+
+async fn fetch_text(url: &str) -> Result<String, reqwest::Error> {
+    reqwest::Client::builder()
+        .timeout(HTTP_REQUEST_TIMEOUT)
+        .build()?
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await
+}
+
+async fn download_to_path(url: &str, destination: &Path) -> Result<()> {
+    if destination.exists() {
+        fs::remove_file(destination)?;
+    }
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("Falha ao iniciar download de {}", url))?
+        .error_for_status()
+        .with_context(|| format!("Download rejeitado por {}", url))?;
+
+    let mut stream = response.bytes_stream();
+    let mut file = File::create(destination)
+        .with_context(|| format!("Falha ao criar {}", destination.display()))?;
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.with_context(|| format!("Erro ao ler dados de {}", url))?;
+        file.write_all(&chunk)?;
+    }
+
+    file.flush()?;
+    Ok(())
+}
+
+fn build_raw_url(relative_path: &str) -> String {
+    format!(
+        "{}/{}",
+        CLIENT_GITHUB_RAW_BASE_URL.trim_end_matches('/'),
+        relative_path.replace('\\', "/")
+    )
+}
+
+fn temporary_path(target_path: &Path, suffix: &str) -> PathBuf {
+    let file_name = target_path
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|| "download".to_string());
+    target_path.with_file_name(format!("{file_name}.{suffix}.tmp"))
+}
+
+fn replace_file(source: &Path, destination: &Path) -> Result<()> {
+    if destination.exists() {
+        fs::remove_file(destination)?;
+    }
+    fs::rename(source, destination).or_else(|_| {
+        fs::copy(source, destination)?;
+        fs::remove_file(source)?;
+        Ok(())
+    })
+}
+
+fn verify_hash(path: &Path, expected_hash: &str) -> Result<()> {
+    let actual_hash = hash_file(path)?;
+    let expected = expected_hash.to_ascii_lowercase();
+    if actual_hash != expected {
+        return Err(anyhow!(
+            "Hash inválido para {} (esperado {}, obtido {})",
+            path.display(),
+            expected,
+            actual_hash
+        ));
+    }
+    Ok(())
+}
+
+fn hash_file(path: &Path) -> Result<String> {
+    let file = File::open(path).with_context(|| format!("Falha ao abrir {}", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+
+    Ok(bytes_to_hex(&hasher.finalize()))
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(hex_nibble(byte >> 4));
+        output.push(hex_nibble(byte & 0x0f));
+    }
+    output
+}
+
+fn hex_nibble(value: u8) -> char {
+    match value {
+        0..=9 => (b'0' + value) as char,
+        10..=15 => (b'a' + (value - 10)) as char,
+        _ => unreachable!(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PackageFile;
+
+    #[test]
+    fn compressed_files_unpack_by_default() {
+        let file = PackageFile {
+            url: "bin/client.exe.lzma".to_string(),
+            localfile: "bin/client.exe".to_string(),
+            packedhash: None,
+            packedsize: None,
+            unpackedhash: None,
+            unpackedsize: None,
+            unpack: None,
         };
 
-        info!(
-            "Versão atual: {}, Versão mais recente: {}",
-            current_version, latest_version
-        );
+        assert!(file.should_unpack());
+    }
 
-        // Verifica se há necessidade de atualização
-        let needs_update = Self::version_needs_update(&current_version, &latest_version);
+    #[test]
+    fn explicit_unpack_false_is_respected() {
+        let file = PackageFile {
+            url: "sounds/catalog-sound.json".to_string(),
+            localfile: "sounds/catalog-sound.json".to_string(),
+            packedhash: None,
+            packedsize: None,
+            unpackedhash: None,
+            unpackedsize: None,
+            unpack: Some(false),
+        };
 
-        info!("Necessita atualização? {}", needs_update);
-
-        Ok(needs_update)
+        assert!(!file.should_unpack());
     }
 }

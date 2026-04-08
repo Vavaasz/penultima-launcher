@@ -17,7 +17,7 @@ pub const PING_SERVER_PORT: u16 = 7171;
 pub const GAME_SERVER_IP: &str = "201.54.8.237";
 
 /// Host web para login
-pub const WEB_LOGIN_HOST: &str = "login.arcadiaot.com.br";
+pub const WEB_LOGIN_HOST: &str = "penultimaotserv.online";
 
 /// Porta HTTPS para conexões seguras
 pub const HTTPS_PORT: u16 = 8443;
@@ -26,21 +26,35 @@ pub const HTTPS_PORT: u16 = 8443;
 // URLS E ENDPOINTS
 // ================================
 
-/// URL para verificação de versão no GitHub
-pub const GITHUB_VERSION_URL: &str = "https://raw.githubusercontent.com/vavasz/Ultima-Launcher/main/version.txt";
+/// URL base do cliente declarado no GitHub
+pub const CLIENT_GITHUB_RAW_BASE_URL: &str =
+    "https://raw.githubusercontent.com/Vavaasz/client-15-23-working/main";
 
-/// URL base para download de releases do GitHub
-pub const GITHUB_RELEASE_URL_TEMPLATE: &str = "https://github.com/vavasz/Ultima-Launcher/releases/download/{}/UltimaOT.zip";
+/// Manifesto principal do cliente
+pub const CLIENT_PACKAGE_MANIFEST_URL: &str =
+    "https://raw.githubusercontent.com/Vavaasz/client-15-23-working/main/package.json";
+
+/// Arquivo com a versão publicada do cliente
+pub const CLIENT_PACKAGE_VERSION_URL: &str =
+    "https://raw.githubusercontent.com/Vavaasz/client-15-23-working/main/package.json.version";
+
+/// Manifesto de assets do cliente
+pub const CLIENT_ASSET_MANIFEST_URL: &str =
+    "https://raw.githubusercontent.com/Vavaasz/client-15-23-working/main/assets.json";
+
+/// Hash do manifesto de assets
+pub const CLIENT_ASSET_MANIFEST_HASH_URL: &str =
+    "https://raw.githubusercontent.com/Vavaasz/client-15-23-working/main/assets.json.sha256";
 
 /// URLs predefinidas para servidores
 pub const PREDEFINED_SERVERS: [&str; 3] = [
-    "https://login.arcadiaot.com.br:8443/login",
+    "https://penultimaotserv.online:8443/login",
     "http://127.0.0.0:8080/login",
     "http://127.0.0.0/login",
 ];
 
 /// URLs individuais para compatibilidade
-pub const PREDEFINED_LOGIN_URL_HTTPS: &str = "https://login.arcadiaot.com.br:8443/login";
+pub const PREDEFINED_LOGIN_URL_HTTPS: &str = "https://penultimaotserv.online:8443/login";
 pub const PREDEFINED_LOGIN_URL_HTTP_8080: &str = "http://127.0.0.0:8080/login";
 pub const PREDEFINED_LOGIN_URL_HTTP: &str = "http://127.0.0.0/login";
 
@@ -52,7 +66,7 @@ pub const EXAMPLE_SERVER_URL: &str = "https://exemplo.com/login";
 // ================================
 
 /// Nome do aplicativo
-pub const APP_NAME: &str = "UltimaOT Launcher";
+pub const APP_NAME: &str = "Penultima Launcher";
 
 /// Nome do processo/instância
 pub const INSTANCE_NAME: &str = "ultimaot-launcher";
@@ -65,7 +79,19 @@ pub const APP_DATA_DIR: &str = "UltimaOT Launcher";
 
 /// Nome do diretório home no Linux/Mac
 pub const HOME_DIR: &str = ".ultimaot-launcher";
-pub const EXTERNAL_GAME_PATH: &str = r"D:\CalmeraLauncher\Calmera_Global";
+pub const EXTERNAL_GAME_PATHS: &[&str] = &[
+    r"D:\Server\Tibia 15.23.bf9553-original-windows",
+    r"D:\Server\Client-15-23-local",
+    r"D:\Server\Cliente-15.20-Local",
+];
+pub const REQUIRED_CLIENT_RUNTIME_FILES: &[&str] = &[
+    r"bin\client.exe",
+    r"bin\Qt6Core.dll",
+    r"bin\Qt6WebEngineCore.dll",
+    r"bin\QtWebEngineProcess.exe",
+    r"bin\qt.conf",
+];
+pub const TRAY_OFFLINE_NAME: &str = "Penultima Server";
 
 // ================================
 // CONFIGURAÇÕES DE PROXY
@@ -114,8 +140,14 @@ pub const PROXY_STATUS_TIMEOUT: Duration = Duration::from_millis(500);
 /// Intervalo para atualização de status de proxy
 pub const PROXY_STATUS_UPDATE_INTERVAL: Duration = Duration::from_secs(60);
 
-/// Intervalo de repaint quando a janela está escondida no tray (2 segundos)
+/// Intervalo de repaint quando a janela está escondida no tray sem interação pendente
 pub const HIDDEN_REPAINT_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Intervalo de polling enquanto há ícones ativos na system tray
+pub const TRAY_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Intervalo de repaint quando a janela está visível mas ociosa
+pub const IDLE_REPAINT_INTERVAL: Duration = Duration::from_millis(400);
 
 /// Duração mínima entre exibições de mensagens
 pub const MESSAGE_DISPLAY_INTERVAL: Duration = Duration::from_secs(2);
@@ -229,11 +261,14 @@ pub const BYTES_TO_MB_DIVISOR: f64 = 1024.0 * 1024.0;
 // CONFIGURAÇÕES DE RENDERIZAÇÃO
 // ================================
 
-/// Valor para baixa latência na renderização
-pub const LOW_LATENCY_RENDER_VALUE: &str = "0.7";
+/// Cor principal do layout
+pub const ACCENT_PRIMARY_RGB: (u8, u8, u8) = (234, 182, 76);
 
-/// Valor padrão para renderização
-pub const DEFAULT_RENDER_VALUE: &str = "1.0";
+/// Cor secundária do layout
+pub const ACCENT_SECONDARY_RGB: (u8, u8, u8) = (110, 146, 255);
+
+/// Cor escura do layout
+pub const SURFACE_RGB: (u8, u8, u8) = (12, 16, 26);
 
 // ================================
 // REGEX PATTERNS
@@ -257,11 +292,6 @@ pub fn get_buffer_size(port: u16) -> usize {
 /// Retorna a URL completa do servidor de ping
 pub fn get_ping_server_address() -> String {
     format!("{}:{}", PING_SERVER_IP, PING_SERVER_PORT)
-}
-
-/// Retorna a URL de download formatada para uma versão específica
-pub fn get_github_download_url(version: &str) -> String {
-    GITHUB_RELEASE_URL_TEMPLATE.replace("{}", version)
 }
 
 /// Retorna o endereço de bind para uma porta específica
