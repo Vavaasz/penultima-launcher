@@ -8,16 +8,16 @@ use std::time::Duration;
 // ================================
 
 /// IP do servidor de ping principal
-pub const PING_SERVER_IP: &str = "191.96.81.67";
+pub const PING_SERVER_IP: &str = "145.223.94.22";
 
 /// Porta do servidor de ping
 pub const PING_SERVER_PORT: u16 = 7171;
 
 /// IP do servidor de jogo (proxy)
-pub const GAME_SERVER_IP: &str = "201.54.8.237";
+pub const GAME_SERVER_IP: &str = "145.223.94.22";
 
 /// Host web para login
-pub const WEB_LOGIN_HOST: &str = "penultimaotserv.online";
+pub const WEB_LOGIN_HOST: &str = "ultimaotserv.online";
 
 /// Porta HTTPS para conexões seguras
 pub const HTTPS_PORT: u16 = 8443;
@@ -28,38 +28,38 @@ pub const HTTPS_PORT: u16 = 8443;
 
 /// URL base do cliente declarado no GitHub
 pub const CLIENT_GITHUB_RAW_BASE_URL: &str =
-    "https://raw.githubusercontent.com/Vavaasz/client-15-23-working/main";
+    "https://raw.githubusercontent.com/Vavaasz/penultima-client/main";
 
 /// Manifesto principal do cliente
 pub const CLIENT_PACKAGE_MANIFEST_URL: &str =
-    "https://raw.githubusercontent.com/Vavaasz/client-15-23-working/main/package.json";
+    "https://raw.githubusercontent.com/Vavaasz/penultima-client/main/package.json";
 
 /// Arquivo com a versão publicada do cliente
 pub const CLIENT_PACKAGE_VERSION_URL: &str =
-    "https://raw.githubusercontent.com/Vavaasz/client-15-23-working/main/package.json.version";
+    "https://raw.githubusercontent.com/Vavaasz/penultima-client/main/package.json.version";
 
 /// Manifesto de assets do cliente
 pub const CLIENT_ASSET_MANIFEST_URL: &str =
-    "https://raw.githubusercontent.com/Vavaasz/client-15-23-working/main/assets.json";
+    "https://raw.githubusercontent.com/Vavaasz/penultima-client/main/assets.json";
 
 /// Hash do manifesto de assets
 pub const CLIENT_ASSET_MANIFEST_HASH_URL: &str =
-    "https://raw.githubusercontent.com/Vavaasz/client-15-23-working/main/assets.json.sha256";
+    "https://raw.githubusercontent.com/Vavaasz/penultima-client/main/assets.json.sha256";
 
 /// URLs predefinidas para servidores
 pub const PREDEFINED_SERVERS: [&str; 3] = [
-    "https://penultimaotserv.online:8443/login",
-    "http://127.0.0.0:8080/login",
-    "http://127.0.0.0/login",
+    "https://ultimaotserv.online/login.php",
+    "http://ultimaotserv.online/login.php",
+    "http://www.ultimaotserv.online/login.php",
 ];
 
 /// URLs individuais para compatibilidade
-pub const PREDEFINED_LOGIN_URL_HTTPS: &str = "https://penultimaotserv.online:8443/login";
-pub const PREDEFINED_LOGIN_URL_HTTP_8080: &str = "http://127.0.0.0:8080/login";
-pub const PREDEFINED_LOGIN_URL_HTTP: &str = "http://127.0.0.0/login";
+pub const PREDEFINED_LOGIN_URL_HTTPS: &str = "https://ultimaotserv.online/login.php";
+pub const PREDEFINED_LOGIN_URL_HTTP_8080: &str = "http://ultimaotserv.online/login.php";
+pub const PREDEFINED_LOGIN_URL_HTTP: &str = "http://www.ultimaotserv.online/login.php";
 
 /// URL de exemplo para hint text
-pub const EXAMPLE_SERVER_URL: &str = "https://exemplo.com/login";
+pub const EXAMPLE_SERVER_URL: &str = "https://ultimaotserv.online/login.php";
 
 // ================================
 // CONFIGURAÇÕES DO LAUNCHER
@@ -80,6 +80,7 @@ pub const APP_DATA_DIR: &str = "UltimaOT Launcher";
 /// Nome do diretório home no Linux/Mac
 pub const HOME_DIR: &str = ".ultimaot-launcher";
 pub const EXTERNAL_GAME_PATHS: &[&str] = &[
+    r"D:\Server\Cliente-15.23-Prod",
     r"D:\Server\Tibia 15.23.bf9553-original-windows",
     r"D:\Server\Client-15-23-local",
     r"D:\Server\Cliente-15.20-Local",

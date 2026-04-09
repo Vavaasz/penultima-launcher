@@ -36,6 +36,8 @@ struct PackageFile {
     unpackedsize: Option<u64>,
     #[serde(default)]
     unpack: Option<bool>,
+    #[serde(default)]
+    bootstrap_only: bool,
 }
 
 impl PackageFile {
@@ -272,6 +274,9 @@ impl UpdateManager {
 
     fn file_needs_update(&self, file: &PackageFile) -> Result<bool> {
         let target_path = file.target_path(&self.game_path);
+        if file.bootstrap_only {
+            return Ok(!target_path.exists());
+        }
         if !target_path.exists() {
             return Ok(true);
         }
@@ -594,6 +599,7 @@ mod tests {
             unpackedhash: None,
             unpackedsize: None,
             unpack: None,
+            bootstrap_only: false,
         };
 
         assert!(file.should_unpack());
@@ -609,6 +615,7 @@ mod tests {
             unpackedhash: None,
             unpackedsize: None,
             unpack: Some(false),
+            bootstrap_only: false,
         };
 
         assert!(!file.should_unpack());
