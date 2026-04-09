@@ -354,6 +354,11 @@ fn collect_source_files(source: &Path) -> Result<Vec<PathBuf>> {
             continue;
         }
 
+        let file_name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        if file_name.ends_with(".bak") {
+            continue;
+        }
+
         let relative = entry
             .path()
             .strip_prefix(source)
