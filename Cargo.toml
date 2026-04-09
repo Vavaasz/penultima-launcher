@@ -1,0 +1,69 @@
+[package]
+name = "ultima-launcher"
+version = "0.1.0"
+edition = "2024"
+
+# Configuração para recursos do Windows
+[package.metadata.winres]
+OriginalFilename = "ultima-launcher.exe"
+FileDescription = "Penultima Launcher"
+ProductName = "Penultima Launcher"
+ProductVersion = "1.0.0"
+LegalCopyright = "Copyright 2025"
+
+[profile.dev]
+opt-level = 0 # Nenhuma otimização para tempos de compilação mais rápidos
+debug = true # Máximo de informações de depuração
+overflow-checks = true # Verificações de estouro de inteiros
+debug-assertions = true # Ativar asserções de depuração
+incremental = true # Compilação incremental para tempos de compilação mais rápidos
+panic = "unwind" # Permite depuração mais detalhada
+
+[profile.release]
+opt-level = 3 # Otimização agressiva para tamanho reduzido
+debug = false # Sem informações de depuração
+debug-assertions = false # Desativar asserções para maior desempenho
+overflow-checks = false # Desativar verificações de estouro para maior velocidade
+lto = "fat" # Otimização de tempo de link mais agressiva
+codegen-units = 1 # Unidades de geração de código única para otimização máxima
+panic = "abort" # Abortar em caso de pânico para reduzir o tamanho do binário
+incremental = false # Sem compilação incremental para otimização máxima
+
+[dependencies]
+tokio = { version = "1.45", features = ["full"] }
+eframe = { version = "0.33.3", features = ["default_fonts", "persistence"] }
+egui = "0.33.3"
+reqwest = { version = "0.13.2", features = ["json", "stream"] }
+anyhow = "1.0.98"
+winapi = { version = "0.3.9", features = ["winuser", "windef", "processthreadsapi", "memoryapi", "consoleapi", "shellapi"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_Storage_FileSystem", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_Graphics_Gdi"] }
+zip = "7.4.0"
+futures-util = "0.3.31"
+semver = "1.0.26"
+log = "0.4.27"
+glob = "0.3.2"
+image = "0.25.6"
+native-tls = "0.2.14"
+tokio-native-tls = "0.3.1"
+single-instance = "0.3.3"
+clap = { version = "4.5.38", features = ["derive"] }
+regex = "1.11.1"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+chrono = "0.4.41"
+dirs = "6.0.0"
+tray-icon = "0.21.3"
+sha2 = "0.10.9"
+lzma-rs = "0.3.0"
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
+
+# Configuração específica para crate principal
+[profile.release.package.ultima-launcher]
+opt-level = 3 # Garantir otimização máxima para o binário principal
+
+# Melhorar otimização de dependências
+[profile.release.build-override]
+opt-level = 3
+codegen-units = 1

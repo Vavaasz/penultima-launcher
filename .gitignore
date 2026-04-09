@@ -1,0 +1,7 @@
+/target
+/target-app
+/target-validation
+/tools/client-feed-builder/target
+/.vs
+/.idea
+nul
