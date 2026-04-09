@@ -3,6 +3,7 @@ use futures_util::StreamExt;
 use log::info;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -48,6 +49,25 @@ impl PackageFile {
     fn target_path(&self, game_path: &Path) -> PathBuf {
         game_path.join(&self.localfile)
     }
+
+    fn manifest_matches(&self, previous: &PackageFile) -> bool {
+        self.url == previous.url
+            && self.localfile == previous.localfile
+            && self.packedhash == previous.packedhash
+            && self.packedsize == previous.packedsize
+            && self.unpackedhash == previous.unpackedhash
+            && self.unpackedsize == previous.unpackedsize
+            && self.unpack == previous.unpack
+            && self.bootstrap_only == previous.bootstrap_only
+    }
+
+    fn expected_local_size(&self) -> Option<u64> {
+        if self.should_unpack() {
+            self.unpackedsize
+        } else {
+            self.packedsize
+        }
+    }
 }
 
 struct RemoteMetadata {
@@ -74,9 +94,7 @@ impl UpdateManager {
     }
 
     pub fn load_current_version(state_path: &PathBuf, game_path: &PathBuf) -> Result<String> {
-        if let Some(version) =
-            read_metadata_file(state_path, game_path, "package.json.version")?
-        {
+        if let Some(version) = read_metadata_file(state_path, game_path, "package.json.version")? {
             return Ok(version.trim().to_string());
         }
 
@@ -99,28 +117,23 @@ impl UpdateManager {
         info!("Verificando cliente declarado em: {:?}", game_path);
 
         if let Err(error) = fs::create_dir_all(game_path) {
-            info!("Falha ao garantir diretório do jogo: {}", error);
+            info!("Falha ao garantir diretorio do jogo: {}", error);
             return Ok(true);
         }
 
         let client_exists = game_path.join("bin").join("client.exe").exists();
         if !client_exists {
-            info!("client.exe não encontrado. Atualização necessária.");
+            info!("client.exe nao encontrado. Atualizacao necessaria.");
             return Ok(true);
         }
 
-        let package_raw = match fetch_text(CLIENT_PACKAGE_MANIFEST_URL).await {
-            Ok(text) => text,
+        let (package_raw, remote_assets_hash) = match tokio::try_join!(
+            fetch_text(CLIENT_PACKAGE_MANIFEST_URL),
+            fetch_text(CLIENT_ASSET_MANIFEST_HASH_URL)
+        ) {
+            Ok(result) => result,
             Err(error) => {
-                info!("Falha ao obter package.json remoto: {}", error);
-                return Ok(false);
-            }
-        };
-
-        let remote_assets_hash = match fetch_text(CLIENT_ASSET_MANIFEST_HASH_URL).await {
-            Ok(text) => text,
-            Err(error) => {
-                info!("Falha ao obter assets.json.sha256 remoto: {}", error);
+                info!("Falha ao obter manifestos remotos: {}", error);
                 return Ok(false);
             }
         };
@@ -130,14 +143,8 @@ impl UpdateManager {
         let local_assets_hash =
             read_metadata_file(state_path, game_path, "assets.json.sha256").unwrap_or_default();
 
-        Ok(local_package
-            .unwrap_or_default()
-            .trim()
-            != package_raw.trim()
-            || local_assets_hash
-                .unwrap_or_default()
-                .trim()
-                != remote_assets_hash.trim())
+        Ok(local_package.unwrap_or_default().trim() != package_raw.trim()
+            || local_assets_hash.unwrap_or_default().trim() != remote_assets_hash.trim())
     }
 
     pub async fn check_for_updates(
@@ -172,8 +179,13 @@ impl UpdateManager {
         send_message(&message_sender, LauncherMessage::DownloadProgress(0.0))?;
 
         let remote = self.fetch_remote_metadata().await?;
-        let local_package =
-            read_metadata_file(&self.state_path, &self.game_path, "package.json")?.unwrap_or_default();
+        let download_client = reqwest::Client::builder()
+            .timeout(HTTP_REQUEST_TIMEOUT)
+            .build()
+            .context("Falha ao inicializar cliente HTTP do updater")?;
+
+        let local_package = read_metadata_file(&self.state_path, &self.game_path, "package.json")?
+            .unwrap_or_default();
         let local_assets_hash =
             read_metadata_file(&self.state_path, &self.game_path, "assets.json.sha256")?
                 .unwrap_or_default();
@@ -188,13 +200,13 @@ impl UpdateManager {
         };
 
         if files_to_update.is_empty() && !assets_changed {
-            info!("Cliente já está sincronizado com o manifesto remoto");
+            info!("Cliente ja esta sincronizado com o manifesto remoto");
             self.persist_metadata(&remote)?;
             self.refresh_versions(&message_sender, &remote.package_version)?;
             send_message(
                 &message_sender,
                 LauncherMessage::SetStatus(format!(
-                    "Cliente já está atualizado ({})",
+                    "Cliente ja esta atualizado ({})",
                     remote.package_version
                 )),
             )?;
@@ -219,8 +231,14 @@ impl UpdateManager {
         }
 
         for (index, file) in files_to_update.iter().enumerate() {
-            self.download_manifest_file(file, index + 1, files_to_update.len(), &message_sender)
-                .await?;
+            self.download_manifest_file(
+                &download_client,
+                file,
+                index + 1,
+                files_to_update.len(),
+                &message_sender,
+            )
+            .await?;
         }
 
         self.persist_metadata(&remote)?;
@@ -229,7 +247,7 @@ impl UpdateManager {
         send_message(&message_sender, LauncherMessage::DownloadProgress(1.0))?;
         send_message(
             &message_sender,
-            LauncherMessage::SetStatus("Atualização concluída. Pronto para jogar.".to_string()),
+            LauncherMessage::SetStatus("Atualizacao concluida. Pronto para jogar.".to_string()),
         )?;
         send_message(&message_sender, LauncherMessage::SetProcessing(false))?;
         send_message(&message_sender, LauncherMessage::DownloadComplete)?;
@@ -242,20 +260,16 @@ impl UpdateManager {
     }
 
     async fn fetch_remote_metadata(&self) -> Result<RemoteMetadata> {
-        let package_raw = fetch_text(CLIENT_PACKAGE_MANIFEST_URL)
-            .await
-            .context("Falha ao baixar package.json")?;
+        let (package_raw, package_version, assets_raw, assets_hash) = tokio::try_join!(
+            fetch_text(CLIENT_PACKAGE_MANIFEST_URL),
+            fetch_text(CLIENT_PACKAGE_VERSION_URL),
+            fetch_text(CLIENT_ASSET_MANIFEST_URL),
+            fetch_text(CLIENT_ASSET_MANIFEST_HASH_URL)
+        )
+        .context("Falha ao baixar metadados remotos do cliente")?;
+
         let package_manifest: PackageManifest =
-            serde_json::from_str(&package_raw).context("package.json remoto inválido")?;
-        let package_version = fetch_text(CLIENT_PACKAGE_VERSION_URL)
-            .await
-            .context("Falha ao baixar package.json.version")?;
-        let assets_raw = fetch_text(CLIENT_ASSET_MANIFEST_URL)
-            .await
-            .context("Falha ao baixar assets.json")?;
-        let assets_hash = fetch_text(CLIENT_ASSET_MANIFEST_HASH_URL)
-            .await
-            .context("Falha ao baixar assets.json.sha256")?;
+            serde_json::from_str(&package_raw).context("package.json remoto invalido")?;
 
         Ok(RemoteMetadata {
             package_raw,
@@ -272,14 +286,70 @@ impl UpdateManager {
         force: bool,
     ) -> Result<Vec<PackageFile>> {
         let mut changed_files = Vec::new();
+        let previous_manifest = if force {
+            None
+        } else {
+            self.load_local_manifest()?
+        };
+        let previous_files: HashMap<String, PackageFile> = previous_manifest
+            .map(|manifest| {
+                manifest
+                    .files
+                    .into_iter()
+                    .map(|file| (file.localfile.clone(), file))
+                    .collect()
+            })
+            .unwrap_or_default();
 
         for file in &manifest.files {
-            if force || self.file_needs_update(file)? {
+            if force || self.file_needs_update_fast(file, previous_files.get(&file.localfile))? {
                 changed_files.push(file.clone());
             }
         }
 
         Ok(changed_files)
+    }
+
+    fn load_local_manifest(&self) -> Result<Option<PackageManifest>> {
+        let Some(manifest_raw) = read_metadata_file(&self.state_path, &self.game_path, "package.json")? else {
+            return Ok(None);
+        };
+
+        let manifest: PackageManifest =
+            serde_json::from_str(&manifest_raw).context("package.json local invalido")?;
+        Ok(Some(manifest))
+    }
+
+    fn file_needs_update_fast(
+        &self,
+        file: &PackageFile,
+        previous_file: Option<&PackageFile>,
+    ) -> Result<bool> {
+        let target_path = file.target_path(&self.game_path);
+        if file.bootstrap_only {
+            return Ok(!target_path.exists());
+        }
+        if !target_path.exists() {
+            return Ok(true);
+        }
+
+        if let Some(previous_file) = previous_file {
+            if file.manifest_matches(previous_file) {
+                if let Some(expected_size) = file.expected_local_size() {
+                    let current_size = target_path
+                        .metadata()
+                        .map(|meta| meta.len())
+                        .unwrap_or_default();
+                    if current_size != expected_size {
+                        return Ok(true);
+                    }
+                }
+
+                return Ok(false);
+            }
+        }
+
+        self.file_needs_update(file)
     }
 
     fn file_needs_update(&self, file: &PackageFile) -> Result<bool> {
@@ -328,6 +398,7 @@ impl UpdateManager {
 
     async fn download_manifest_file(
         &self,
+        http_client: &reqwest::Client,
         file: &PackageFile,
         index: usize,
         total: usize,
@@ -350,7 +421,7 @@ impl UpdateManager {
 
         if let Some(parent) = target_path.parent() {
             fs::create_dir_all(parent)
-                .with_context(|| format!("Falha ao criar diretório {}", parent.display()))?;
+                .with_context(|| format!("Falha ao criar diretorio {}", parent.display()))?;
         }
 
         send_message(
@@ -365,7 +436,7 @@ impl UpdateManager {
         };
         send_message(message_sender, LauncherMessage::DownloadProgress(progress))?;
 
-        download_to_path(&build_raw_url(&file.url), &packed_temp_path).await?;
+        download_to_path(http_client, &build_raw_url(&file.url), &packed_temp_path).await?;
 
         if file.should_unpack() {
             if let Some(expected_hash) = &file.packedhash {
@@ -382,7 +453,7 @@ impl UpdateManager {
             );
             let mut unpacked_file = File::create(&unpacked_temp_path).with_context(|| {
                 format!(
-                    "Falha ao criar arquivo temporário {}",
+                    "Falha ao criar arquivo temporario {}",
                     unpacked_temp_path.display()
                 )
             })?;
@@ -524,13 +595,16 @@ async fn fetch_text(url: &str) -> Result<String, reqwest::Error> {
         .await
 }
 
-async fn download_to_path(url: &str, destination: &Path) -> Result<()> {
+async fn download_to_path(
+    http_client: &reqwest::Client,
+    url: &str,
+    destination: &Path,
+) -> Result<()> {
     if destination.exists() {
         fs::remove_file(destination)?;
     }
 
-    let client = reqwest::Client::new();
-    let response = client
+    let response = http_client
         .get(url)
         .send()
         .await
@@ -583,7 +657,7 @@ fn verify_hash(path: &Path, expected_hash: &str) -> Result<()> {
     let expected = expected_hash.to_ascii_lowercase();
     if actual_hash != expected {
         return Err(anyhow!(
-            "Hash inválido para {} (esperado {}, obtido {})",
+            "Hash invalido para {} (esperado {}, obtido {})",
             path.display(),
             expected,
             actual_hash

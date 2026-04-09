@@ -709,7 +709,7 @@ impl GameLauncher {
                                 }
 
                                 // Pequeno delay para que o usuário veja a mensagem
-                                tokio::time::sleep(Duration::from_millis(5000)).await;
+                                tokio::time::sleep(Duration::from_millis(800)).await;
 
                                 // Iniciar o jogo
                                 if let Some(sender) = message_sender {
@@ -1069,7 +1069,7 @@ impl GameLauncher {
     fn load_background(&mut self, ctx: &egui::Context) {
         // Carregar o papel de parede
         if let Ok(image_data) = image::load_from_memory(include_bytes!(
-            "../../UniServerZ/www/templates/tibiacom/images/header/background-artwork.jpg"
+            "../assets/background-artwork.png"
         )) {
             let image = image_data.into_rgba8();
             let (width, height) = image.dimensions();
