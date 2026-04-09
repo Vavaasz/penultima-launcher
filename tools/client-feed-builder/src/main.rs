@@ -6,6 +6,8 @@ use std::env;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::thread;
+use std::time::Duration;
 use walkdir::WalkDir;
 
 const MANAGED_DIRS: &[&str] = &["assets", "bin", "sounds"];
@@ -81,12 +83,7 @@ fn main() -> Result<()> {
         bail!("source directory does not exist: {}", args.source.display());
     }
 
-    if args.output.exists() {
-        fs::remove_dir_all(&args.output)
-            .with_context(|| format!("failed to clean {}", args.output.display()))?;
-    }
-    fs::create_dir_all(&args.output)
-        .with_context(|| format!("failed to create {}", args.output.display()))?;
+    prepare_output_directory(&args.output)?;
 
     let files = collect_source_files(&args.source)?;
     let mut package_files = Vec::with_capacity(files.len());
@@ -171,12 +168,18 @@ fn main() -> Result<()> {
     package_files.sort_by(|left, right| left.localfile.cmp(&right.localfile));
     tracked_files.sort_by(|left, right| left.path.cmp(&right.path));
 
+    let resolved_version = if args.version == "auto" {
+        auto_version(&tracked_files)
+    } else {
+        args.version.clone()
+    };
+
     let package = PackageManifest {
-        version: args.version.clone(),
+        version: resolved_version.clone(),
         files: package_files,
     };
     let assets = AssetManifest {
-        version: args.version.clone(),
+        version: resolved_version.clone(),
         tracked_files,
     };
 
@@ -190,7 +193,7 @@ fn main() -> Result<()> {
         .context("failed to write package.json")?;
     fs::write(
         args.output.join("package.json.version"),
-        format!("{}\n", args.version),
+        format!("{}\n", resolved_version),
     )
     .context("failed to write package.json.version")?;
     fs::write(args.output.join("assets.json"), format!("{assets_json}\n"))
@@ -202,7 +205,9 @@ fn main() -> Result<()> {
     .context("failed to write assets.json.sha256")?;
     fs::write(args.output.join(".gitignore"), public_repo_gitignore())
         .context("failed to write .gitignore")?;
-    fs::write(args.output.join("README.md"), public_repo_readme(&args.version))
+    fs::write(args.output.join(".gitattributes"), public_repo_gitattributes())
+        .context("failed to write .gitattributes")?;
+    fs::write(args.output.join("README.md"), public_repo_readme(&resolved_version))
         .context("failed to write README.md")?;
 
     println!(
@@ -212,6 +217,84 @@ fn main() -> Result<()> {
     );
 
     Ok(())
+}
+
+fn auto_version(tracked_files: &[TrackedFile]) -> String {
+    let mut hasher = Sha256::new();
+    for file in tracked_files {
+        hasher.update(file.path.as_bytes());
+        hasher.update([0]);
+        hasher.update(file.sha256.as_bytes());
+        hasher.update([0]);
+        hasher.update(file.size.to_le_bytes());
+        hasher.update([if file.bootstrap_only { 1 } else { 0 }]);
+    }
+
+    let digest = hex_string(&hasher.finalize());
+    format!("15.23-prod-{}", &digest[..12])
+}
+
+fn prepare_output_directory(output: &Path) -> Result<()> {
+    fs::create_dir_all(output)
+        .with_context(|| format!("failed to create {}", output.display()))?;
+
+    for dir_name in MANAGED_DIRS.iter().chain(BOOTSTRAP_ONLY_DIRS.iter()) {
+        let target = output.join(dir_name);
+        if target.exists() {
+            remove_dir_all_retry(&target)?;
+        }
+    }
+
+    for file_name in [
+        "package.json",
+        "package.json.version",
+        "assets.json",
+        "assets.json.sha256",
+        ".gitignore",
+        ".gitattributes",
+        "README.md",
+    ] {
+        let target = output.join(file_name);
+        if target.exists() {
+            remove_file_retry(&target)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn remove_dir_all_retry(path: &Path) -> Result<()> {
+    let mut last_error = None;
+    for _ in 0..5 {
+        match fs::remove_dir_all(path) {
+            Ok(_) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                thread::sleep(Duration::from_millis(250));
+            }
+        }
+    }
+
+    Err(last_error
+        .with_context(|| format!("failed to clean {}", path.display()))?
+        .into())
+}
+
+fn remove_file_retry(path: &Path) -> Result<()> {
+    let mut last_error = None;
+    for _ in 0..5 {
+        match fs::remove_file(path) {
+            Ok(_) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+
+    Err(last_error
+        .with_context(|| format!("failed to clean {}", path.display()))?
+        .into())
 }
 
 fn parse_args() -> Result<Args> {
@@ -376,6 +459,10 @@ fn hex_nibble(value: u8) -> char {
 fn public_repo_gitignore() -> String {
     "# Public client feed artifacts are generated intentionally.\n# Runtime folders stay out of the feed.\n/cache/\n/characterdata/\n/crashdump/\n/log/\n/minimap/\n/screenshots/\n/storeimages/\n"
         .to_string()
+}
+
+fn public_repo_gitattributes() -> String {
+    "* -text\n".to_string()
 }
 
 fn public_repo_readme(version: &str) -> String {
