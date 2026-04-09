@@ -50,6 +50,7 @@ struct GameLauncher {
     progress: f32,
     download_path: PathBuf,
     game_path: PathBuf,
+    state_path: PathBuf,
     current_version: Option<String>,
     update_sender: Option<mpsc::UnboundedSender<()>>,
     message_receiver: Option<mpsc::UnboundedReceiver<LauncherMessage>>,
@@ -86,6 +87,7 @@ impl Default for GameLauncher {
             AppDirs::init().expect("Não foi possível inicializar diretórios da aplicação");
         let download_path = app_dirs.download_path.clone();
         let game_path = app_dirs.game_path.clone();
+        let state_path = app_dirs.state_path.clone();
         // Usar AppDirs::get_version_file_path para obter o caminho do arquivo de versão
         let version_file_path = app_dirs.get_version_file_path();
         info!("Caminho do arquivo de versão: {:?}", version_file_path);
@@ -98,7 +100,11 @@ impl Default for GameLauncher {
         let game_client = GameClient::default();
 
         // Carregar configurações do usuário
-        let cache_manager = cache::CacheManager::new(download_path.clone(), game_path.clone());
+        let cache_manager = cache::CacheManager::new(
+            download_path.clone(),
+            game_path.clone(),
+            state_path.clone(),
+        );
         let disable_auto_start = cache_manager
             .load_user_settings()
             .map(|settings| settings.disable_auto_start)
@@ -109,6 +115,7 @@ impl Default for GameLauncher {
             progress: 0.0,
             download_path: download_path.clone(),
             game_path: game_path.clone(),
+            state_path: state_path.clone(),
             current_version: None,
             update_sender: None,
             message_receiver: None,
@@ -142,7 +149,9 @@ impl Default for GameLauncher {
         // Carregar versão do client.exe
         launcher.load_client_version();
 
-        if let Ok(version) = updates::UpdateManager::load_current_version(&launcher.game_path) {
+        if let Ok(version) =
+            updates::UpdateManager::load_current_version(&launcher.state_path, &launcher.game_path)
+        {
             launcher.current_version = Some(version);
         }
 
@@ -356,14 +365,18 @@ impl GameLauncher {
 
         let download_path = self.download_path.clone();
         let game_path = self.game_path.clone();
+        let state_path = self.state_path.clone();
         let disable_auto_start = self.disable_auto_start;
         let message_tx = message_tx.clone();
 
         tokio::spawn(async move {
             while let Some(_) = update_rx.recv().await {
                 // Criar instância do UpdateManager
-                let update_manager =
-                    updates::UpdateManager::new(download_path.clone(), game_path.clone());
+                let update_manager = updates::UpdateManager::new(
+                    download_path.clone(),
+                    game_path.clone(),
+                    state_path.clone(),
+                );
                 match update_manager
                     .check_for_updates(message_tx.clone(), disable_auto_start)
                     .await
@@ -387,6 +400,7 @@ impl GameLauncher {
         info!("Tentando iniciar o jogo...");
         self.status = "Iniciando o cliente...".to_string();
         self.is_processing = true;
+        ConfigModal::ensure_default_config(&self.game_path)?;
 
         // Usar o GameClient para iniciar o jogo principal
         match self.game_client.launch_main_client(&self.game_path) {
@@ -412,6 +426,8 @@ impl GameLauncher {
     }
 
     fn launch_client(&mut self) -> Result<()> {
+        ConfigModal::ensure_default_config(&self.game_path)?;
+
         // Usar o GameClient para iniciar um cliente adicional
         match self.game_client.launch_additional_client(&self.game_path) {
             Ok(_) => {
@@ -622,6 +638,7 @@ impl GameLauncher {
 
             let game_path = self.game_path.clone();
             let download_path = self.download_path.clone();
+            let state_path = self.state_path.clone();
             let window_state = self.window_state.clone();
             let needs_repaint = self.needs_repaint.clone();
             let message_sender = self.message_sender.clone();
@@ -637,7 +654,7 @@ impl GameLauncher {
                 }
 
                 info!("Verificando atualizações iniciais...");
-                match updates::UpdateManager::check_initial_updates(&game_path).await {
+                match updates::UpdateManager::check_initial_updates(&game_path, &state_path).await {
                     Ok(needs_update) => {
                         if needs_update {
                             info!("Atualização encontrada! Mostrando launcher...");
@@ -659,11 +676,15 @@ impl GameLauncher {
 
                                 // Iniciar o download automaticamente
                                 let game_path = game_path.clone();
+                                let state_path = state_path.clone();
                                 let message_tx = sender.clone();
 
                                 tokio::spawn(async move {
-                                    let update_manager =
-                                        updates::UpdateManager::new(download_path, game_path);
+                                    let update_manager = updates::UpdateManager::new(
+                                        download_path,
+                                        game_path,
+                                        state_path,
+                                    );
                                     if let Err(e) = update_manager
                                         .check_for_updates(message_tx, disable_auto_start)
                                         .await
@@ -1004,8 +1025,13 @@ impl GameLauncher {
 
                                     let download_path = self.download_path.clone();
                                     let game_path = self.game_path.clone();
+                                    let state_path = self.state_path.clone();
                                     let disable_auto_start = self.disable_auto_start;
-                                    let update_manager = updates::UpdateManager::new(download_path, game_path);
+                                    let update_manager = updates::UpdateManager::new(
+                                        download_path,
+                                        game_path,
+                                        state_path,
+                                    );
 
                                     tokio::spawn(async move {
                                         match update_manager.force_refresh(tx.clone(), disable_auto_start).await {
@@ -1064,7 +1090,7 @@ impl GameLauncher {
 
         // Carregar o logo
         if let Ok(logo_data) = image::load_from_memory(include_bytes!(
-            "../../UniServerZ/www/templates/tibiacom/images/header/tibia-logo-artwork-top.png"
+            "../assets/penultima-phoenix.png"
         )) {
             let logo = logo_data.into_rgba8();
 
@@ -1126,14 +1152,12 @@ async fn main() -> Result<()> {
     // Verificar se o launcher já está rodando
     if !instance_manager.ensure_single_instance()? {
         // Se já estiver rodando, enviar sinal para mostrar a janela
-        let app_dirs = AppDirs::init().context("Falha ao inicializar diretórios da aplicação")?;
+        let _app_dirs = AppDirs::init().context("Falha ao inicializar diretórios da aplicação")?;
 
-        // Usar get_signal_file_path para obter o caminho do arquivo de sinal
-        if let Some(signal_path) = AppDirs::get_signal_file_path() {
-            info!("Caminho do arquivo de sinal: {:?}", signal_path);
-        }
-
-        instance_manager.signal_running_instance(&app_dirs.game_path)?;
+        let signal_path = AppDirs::get_signal_file_path()
+            .context("Falha ao resolver o arquivo de sinal do launcher")?;
+        info!("Caminho do arquivo de sinal: {:?}", signal_path);
+        instance_manager.signal_running_instance(&signal_path)?;
         std::process::exit(0);
     }
 
@@ -1142,13 +1166,16 @@ async fn main() -> Result<()> {
 
     info!("Diretório de download: {:?}", app_dirs.download_path);
     info!("Diretório do jogo: {:?}", app_dirs.game_path);
+    info!("Diretório de estado: {:?}", app_dirs.state_path);
 
     // Criar diretórios se não existirem
     fs::create_dir_all(&app_dirs.download_path).context("Falha ao criar diretório de cache")?;
     fs::create_dir_all(&app_dirs.game_path).context("Falha ao criar diretório de dados")?;
+    fs::create_dir_all(&app_dirs.state_path).context("Falha ao criar diretório interno")?;
 
     // Clonando o caminho para evitar erros de movimento
-    let game_path_clone = app_dirs.game_path.clone();
+    let signal_path =
+        AppDirs::get_signal_file_path().context("Falha ao resolver o arquivo de sinal")?;
 
     // Criar o gerenciador de janelas
     let window_manager = WindowManager::new();
@@ -1171,7 +1198,7 @@ async fn main() -> Result<()> {
     }
 
     // Iniciar o monitor de sinal para exibição da janela
-    instance_manager.start_signal_monitor(game_path_clone, window_state.clone());
+    instance_manager.start_signal_monitor(signal_path, window_state.clone());
 
     // let config = Arc::new(proxy::ProxyConfig::default());
 

@@ -69,22 +69,16 @@ pub const EXAMPLE_SERVER_URL: &str = "https://ultimaotserv.online/login.php";
 pub const APP_NAME: &str = "Penultima Launcher";
 
 /// Nome do processo/instância
-pub const INSTANCE_NAME: &str = "ultimaot-launcher";
+pub const INSTANCE_NAME: &str = "penultima-launcher";
 
 /// Nome do arquivo de log
 pub const LOG_FILENAME: &str = "launcher.log";
 
 /// Nome do diretório base no AppData
-pub const APP_DATA_DIR: &str = "UltimaOT Launcher";
+pub const APP_DATA_DIR: &str = "Penultima Launcher";
 
 /// Nome do diretório home no Linux/Mac
-pub const HOME_DIR: &str = ".ultimaot-launcher";
-pub const EXTERNAL_GAME_PATHS: &[&str] = &[
-    r"D:\Server\Cliente-15.23-Prod",
-    r"D:\Server\Tibia 15.23.bf9553-original-windows",
-    r"D:\Server\Client-15-23-local",
-    r"D:\Server\Cliente-15.20-Local",
-];
+pub const HOME_DIR: &str = ".penultima-launcher";
 pub const REQUIRED_CLIENT_RUNTIME_FILES: &[&str] = &[
     r"bin\client.exe",
     r"bin\Qt6Core.dll",

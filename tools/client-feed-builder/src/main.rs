@@ -11,7 +11,6 @@ use std::time::Duration;
 use walkdir::WalkDir;
 
 const MANAGED_DIRS: &[&str] = &["assets", "bin", "sounds"];
-const BOOTSTRAP_ONLY_DIRS: &[&str] = &["conf"];
 const SKIP_DIRS: &[&str] = &[
     ".git",
     "cache",
@@ -93,7 +92,7 @@ fn main() -> Result<()> {
         let source_path = args.source.join(&relative_path);
         let relative_str = normalize_relative_path(&relative_path)?;
         let top_level = top_level_dir(&relative_path)?;
-        let bootstrap_only = BOOTSTRAP_ONLY_DIRS.contains(&top_level.as_str());
+        let bootstrap_only = false;
 
         if top_level == "bin" {
             let output_relative = format!("{relative_str}.lzma");
@@ -238,7 +237,7 @@ fn prepare_output_directory(output: &Path) -> Result<()> {
     fs::create_dir_all(output)
         .with_context(|| format!("failed to create {}", output.display()))?;
 
-    for dir_name in MANAGED_DIRS.iter().chain(BOOTSTRAP_ONLY_DIRS.iter()) {
+    for dir_name in MANAGED_DIRS.iter().copied().chain(["conf"]) {
         let target = output.join(dir_name);
         if target.exists() {
             remove_dir_all_retry(&target)?;
@@ -320,11 +319,7 @@ fn parse_args() -> Result<Args> {
 }
 
 fn collect_source_files(source: &Path) -> Result<Vec<PathBuf>> {
-    let allowed_dirs: BTreeSet<&str> = MANAGED_DIRS
-        .iter()
-        .copied()
-        .chain(BOOTSTRAP_ONLY_DIRS.iter().copied())
-        .collect();
+    let allowed_dirs: BTreeSet<&str> = MANAGED_DIRS.iter().copied().collect();
     let skip_dirs: BTreeSet<&str> = SKIP_DIRS.iter().copied().collect();
     let mut files = Vec::new();
 
@@ -467,6 +462,6 @@ fn public_repo_gitattributes() -> String {
 
 fn public_repo_readme(version: &str) -> String {
     format!(
-        "# Penultima Client\n\nPublic update feed for the Penultima Launcher.\n\n- Version: `{version}`\n- Managed folders: `assets`, `bin`, `sounds`\n- Bootstrap-only folders: `conf`\n\nPlayers should use the Penultima Launcher to download and update the client automatically.\n"
+        "# Penultima Client\n\nPublic update feed for the Penultima Launcher.\n\n- Version: `{version}`\n- Managed folders: `assets`, `bin`, `sounds`\n\nPlayers should use the Penultima Launcher to download and update the client automatically.\n"
     )
 }

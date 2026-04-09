@@ -131,7 +131,7 @@ pub fn log_to_file(level: Level, message: &str) -> std::io::Result<()> {
 
     let app_dirs = crate::app_dirs::AppDirs::init().ok();
     if let Some(dirs) = app_dirs {
-        let log_path = dirs.game_path.join(LOG_FILENAME);
+        let log_path = dirs.state_path.join(LOG_FILENAME);
 
         let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
         let log_entry = format!("[{}] {} {}\n", timestamp, level, message);

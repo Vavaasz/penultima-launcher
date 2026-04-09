@@ -61,40 +61,41 @@ struct RemoteMetadata {
 pub struct UpdateManager {
     download_path: PathBuf,
     game_path: PathBuf,
+    state_path: PathBuf,
 }
 
 impl UpdateManager {
-    pub fn new(download_path: PathBuf, game_path: PathBuf) -> Self {
+    pub fn new(download_path: PathBuf, game_path: PathBuf, state_path: PathBuf) -> Self {
         Self {
             download_path,
             game_path,
+            state_path,
         }
     }
 
-    pub fn load_current_version(game_path: &PathBuf) -> Result<String> {
-        let package_version_path = game_path.join("package.json.version");
-        if package_version_path.exists() {
-            let version = fs::read_to_string(package_version_path)?;
+    pub fn load_current_version(state_path: &PathBuf, game_path: &PathBuf) -> Result<String> {
+        if let Some(version) =
+            read_metadata_file(state_path, game_path, "package.json.version")?
+        {
             return Ok(version.trim().to_string());
         }
 
-        let version_file = game_path.join("version.txt");
-        if version_file.exists() {
-            let version = fs::read_to_string(version_file)?;
+        if let Some(version) = read_metadata_file(state_path, game_path, "version.txt")? {
             return Ok(version.trim().to_string());
         }
 
-        let package_manifest_path = game_path.join("package.json");
-        if package_manifest_path.exists() {
-            let manifest: PackageManifest =
-                serde_json::from_str(&fs::read_to_string(package_manifest_path)?)?;
+        if let Some(manifest_raw) = read_metadata_file(state_path, game_path, "package.json")? {
+            let manifest: PackageManifest = serde_json::from_str(&manifest_raw)?;
             return Ok(manifest.version);
         }
 
         Ok("0.0.0".to_string())
     }
 
-    pub async fn check_initial_updates(game_path: &PathBuf) -> Result<bool, reqwest::Error> {
+    pub async fn check_initial_updates(
+        game_path: &PathBuf,
+        state_path: &PathBuf,
+    ) -> Result<bool, reqwest::Error> {
         info!("Verificando cliente declarado em: {:?}", game_path);
 
         if let Err(error) = fs::create_dir_all(game_path) {
@@ -124,12 +125,19 @@ impl UpdateManager {
             }
         };
 
-        let local_package = fs::read_to_string(game_path.join("package.json")).unwrap_or_default();
+        let local_package =
+            read_metadata_file(state_path, game_path, "package.json").unwrap_or_default();
         let local_assets_hash =
-            fs::read_to_string(game_path.join("assets.json.sha256")).unwrap_or_default();
+            read_metadata_file(state_path, game_path, "assets.json.sha256").unwrap_or_default();
 
-        Ok(local_package.trim() != package_raw.trim()
-            || local_assets_hash.trim() != remote_assets_hash.trim())
+        Ok(local_package
+            .unwrap_or_default()
+            .trim()
+            != package_raw.trim()
+            || local_assets_hash
+                .unwrap_or_default()
+                .trim()
+                != remote_assets_hash.trim())
     }
 
     pub async fn check_for_updates(
@@ -164,9 +172,11 @@ impl UpdateManager {
         send_message(&message_sender, LauncherMessage::DownloadProgress(0.0))?;
 
         let remote = self.fetch_remote_metadata().await?;
-        let local_package = fs::read_to_string(self.package_manifest_path()).unwrap_or_default();
+        let local_package =
+            read_metadata_file(&self.state_path, &self.game_path, "package.json")?.unwrap_or_default();
         let local_assets_hash =
-            fs::read_to_string(self.asset_manifest_hash_path()).unwrap_or_default();
+            read_metadata_file(&self.state_path, &self.game_path, "assets.json.sha256")?
+                .unwrap_or_default();
 
         let package_changed = force || local_package.trim() != remote.package_raw.trim();
         let assets_changed = force || local_assets_hash.trim() != remote.assets_hash.trim();
@@ -400,7 +410,7 @@ impl UpdateManager {
     }
 
     fn persist_metadata(&self, remote: &RemoteMetadata) -> Result<()> {
-        fs::create_dir_all(&self.game_path)?;
+        fs::create_dir_all(&self.state_path)?;
         fs::write(self.package_manifest_path(), &remote.package_raw)?;
         fs::write(
             self.package_version_path(),
@@ -412,9 +422,10 @@ impl UpdateManager {
             format!("{}\n", remote.assets_hash),
         )?;
         fs::write(
-            self.game_path.join("version.txt"),
+            self.state_path.join("version.txt"),
             format!("{}\n", remote.package_version),
         )?;
+        self.remove_legacy_metadata_files()?;
         Ok(())
     }
 
@@ -446,20 +457,50 @@ impl UpdateManager {
     }
 
     fn package_manifest_path(&self) -> PathBuf {
-        self.game_path.join("package.json")
+        self.state_path.join("package.json")
     }
 
     fn package_version_path(&self) -> PathBuf {
-        self.game_path.join("package.json.version")
+        self.state_path.join("package.json.version")
     }
 
     fn asset_manifest_path(&self) -> PathBuf {
-        self.game_path.join("assets.json")
+        self.state_path.join("assets.json")
     }
 
     fn asset_manifest_hash_path(&self) -> PathBuf {
-        self.game_path.join("assets.json.sha256")
+        self.state_path.join("assets.json.sha256")
     }
+
+    fn remove_legacy_metadata_files(&self) -> Result<()> {
+        for file_name in [
+            "package.json",
+            "package.json.version",
+            "assets.json",
+            "assets.json.sha256",
+            "version.txt",
+        ] {
+            let legacy_path = self.game_path.join(file_name);
+            if legacy_path.exists() {
+                let _ = fs::remove_file(legacy_path);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn read_metadata_file(
+    state_path: &Path,
+    game_path: &Path,
+    file_name: &str,
+) -> Result<Option<String>> {
+    for candidate in [state_path.join(file_name), game_path.join(file_name)] {
+        if candidate.exists() {
+            return Ok(Some(fs::read_to_string(candidate)?));
+        }
+    }
+
+    Ok(None)
 }
 
 fn send_message(

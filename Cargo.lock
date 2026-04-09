@@ -3709,6 +3709,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "penultima-launcher"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "dirs",
+ "eframe",
+ "egui",
+ "futures-util",
+ "glob",
+ "image",
+ "log",
+ "lzma-rs",
+ "native-tls",
+ "regex",
+ "reqwest",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "single-instance",
+ "tokio",
+ "tokio-native-tls",
+ "tray-icon",
+ "winapi",
+ "windows 0.62.2",
+ "winres",
+ "zip",
+]
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5306,38 +5338,6 @@ dependencies = [
  "memoffset 0.9.1",
  "tempfile",
  "winapi",
-]
-
-[[package]]
-name = "ultima-launcher"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "dirs",
- "eframe",
- "egui",
- "futures-util",
- "glob",
- "image",
- "log",
- "lzma-rs",
- "native-tls",
- "regex",
- "reqwest",
- "semver",
- "serde",
- "serde_json",
- "sha2",
- "single-instance",
- "tokio",
- "tokio-native-tls",
- "tray-icon",
- "winapi",
- "windows 0.62.2",
- "winres",
- "zip",
 ]
 
 [[package]]
