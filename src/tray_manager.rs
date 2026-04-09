@@ -335,7 +335,7 @@ impl TrayManager {
     }
 
     fn load_tray_icon() -> Result<Icon> {
-        let icon = include_bytes!("../assets/ultima-logo.ico");
+        let icon = include_bytes!("../assets/penultima-phoenix.ico");
         let (icon_rgba, icon_width, icon_height) = {
             let image = image::load_from_memory(icon)
                 .context("Falha ao carregar ícone da tray")?
@@ -348,7 +348,7 @@ impl TrayManager {
     }
 
     pub fn load_window_icon() -> Option<Arc<IconData>> {
-        let icon = include_bytes!("../assets/ultima-logo.ico");
+        let icon = include_bytes!("../assets/penultima-phoenix.ico");
         let (icon_rgba, icon_width, icon_height) = {
             let image = image::load_from_memory(icon).ok()?.into_rgba8();
             let (width, height) = image.dimensions();

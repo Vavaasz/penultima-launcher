@@ -6,14 +6,14 @@ What it does:
 
 - downloads and updates the public client feed from `Vavaasz/penultima-client`
 - only updates managed client folders: `assets`, `bin`, and `sounds`
-- seeds `conf` files once without overwriting player-local changes later
+- keeps launcher state in AppData instead of writing manifests into the client root
 - starts the client with production defaults for `ultimaotserv.online`
 
 For players:
 
 - download the latest release zip
 - extract it anywhere
-- run `ultima-launcher.exe`
+- run `penultima-launcher.exe`
 - let the launcher download or update the client automatically
 
 Public client feed:

@@ -1,11 +1,11 @@
 [package]
-name = "ultima-launcher"
+name = "penultima-launcher"
 version = "0.1.0"
 edition = "2024"
 
 # Configuração para recursos do Windows
 [package.metadata.winres]
-OriginalFilename = "ultima-launcher.exe"
+OriginalFilename = "penultima-launcher.exe"
 FileDescription = "Penultima Launcher"
 ProductName = "Penultima Launcher"
 ProductVersion = "1.0.0"
@@ -60,7 +60,7 @@ lzma-rs = "0.3.0"
 winres = "0.1"
 
 # Configuração específica para crate principal
-[profile.release.package.ultima-launcher]
+[profile.release.package.penultima-launcher]
 opt-level = 3 # Garantir otimização máxima para o binário principal
 
 # Melhorar otimização de dependências

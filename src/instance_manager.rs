@@ -31,17 +31,20 @@ impl InstanceManager {
         Ok(is_single)
     }
 
-    pub fn signal_running_instance(&self, data_dir: &PathBuf) -> Result<()> {
-        let signal_file = data_dir.join("show.signal");
+    pub fn signal_running_instance(&self, signal_file: &PathBuf) -> Result<()> {
         info!(
-            "Sinalizando para instÃ¢ncia existente atravÃ©s do arquivo: {:?}",
+            "Sinalizando para instância existente através do arquivo: {:?}",
             signal_file
         );
         fs::write(signal_file, "show")?;
         Ok(())
     }
 
-    pub fn start_signal_monitor(&self, data_dir: PathBuf, window_state: Arc<Mutex<WindowState>>) {
+    pub fn start_signal_monitor(
+        &self,
+        signal_file: PathBuf,
+        window_state: Arc<Mutex<WindowState>>,
+    ) {
         thread::spawn(move || {
             let window_manager = WindowManager {
                 window_state,
@@ -49,7 +52,6 @@ impl InstanceManager {
             };
 
             loop {
-                let signal_file = data_dir.join("show.signal");
                 if signal_file.exists() {
                     info!("Sinal de mostrar janela detectado!");
                     let _ = fs::remove_file(&signal_file);

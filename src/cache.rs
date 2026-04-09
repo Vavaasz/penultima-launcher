@@ -15,6 +15,8 @@ pub struct CacheManager {
     download_path: PathBuf,
     /// Caminho para o diretório do jogo
     game_path: PathBuf,
+    /// Caminho para o estado persistido do launcher
+    state_path: PathBuf,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -32,22 +34,24 @@ impl Default for UserSettings {
 
 impl CacheManager {
     /// Cria uma nova instância do CacheManager
-    pub fn new(download_path: PathBuf, game_path: PathBuf) -> Self {
+    pub fn new(download_path: PathBuf, game_path: PathBuf, state_path: PathBuf) -> Self {
         Self {
             download_path,
             game_path,
+            state_path,
         }
     }
 
     pub fn save_user_settings(&self, settings: &UserSettings) -> Result<()> {
-        let settings_path = self.game_path.join("settings.json");
+        fs::create_dir_all(&self.state_path)?;
+        let settings_path = self.state_path.join("settings.json");
         let json = serde_json::to_string_pretty(settings)?;
         fs::write(&settings_path, json)?;
         Ok(())
     }
 
     pub fn load_user_settings(&self) -> Result<UserSettings> {
-        let settings_path = self.game_path.join("settings.json");
+        let settings_path = self.state_path.join("settings.json");
         if settings_path.exists() {
             let json = fs::read_to_string(&settings_path)?;
             let settings = serde_json::from_str(&json)?;
@@ -83,11 +87,14 @@ impl CacheManager {
             "Limpando cache do jogo...".to_string(),
         ));
 
-        // Verificar e limpar o diretório de cache personalizado dentro da pasta do jogo
-        let custom_cache_path = self.game_path.join("UltimaOT").join("cache");
-        let custom_size =
-            self.clean_directory(&custom_cache_path, "cache personalizado", &message_sender)?;
-        total_cleaned_mb += custom_size;
+        for custom_cache_path in [
+            self.game_path.join("Penultima").join("cache"),
+            self.game_path.join("UltimaOT").join("cache"),
+        ] {
+            let custom_size =
+                self.clean_directory(&custom_cache_path, "cache personalizado", &message_sender)?;
+            total_cleaned_mb += custom_size;
+        }
 
         // Atualiza o progresso para indicar conclusão
         let _ = message_sender.send(LauncherMessage::DownloadProgress(1.0));

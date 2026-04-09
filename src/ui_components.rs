@@ -505,7 +505,11 @@ impl GameLauncher {
                     // Salvar a configuração quando alterada
                     let settings = cache::UserSettings { disable_auto_start };
                     if let Err(e) =
-                        cache::CacheManager::new(self.download_path.clone(), self.game_path.clone())
+                        cache::CacheManager::new(
+                            self.download_path.clone(),
+                            self.game_path.clone(),
+                            self.state_path.clone(),
+                        )
                             .save_user_settings(&settings)
                     {
                         info!("Erro ao salvar configurações: {}", e);
@@ -542,7 +546,9 @@ impl GameLauncher {
 
                         let download_path = self.download_path.clone();
                         let game_path = self.game_path.clone();
-                        let cache_manager = cache::CacheManager::new(download_path, game_path);
+                        let state_path = self.state_path.clone();
+                        let cache_manager =
+                            cache::CacheManager::new(download_path, game_path, state_path);
 
                         tokio::spawn(async move {
                             match cache_manager.clean_cache(tx.clone()).await {

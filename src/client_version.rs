@@ -12,6 +12,7 @@ impl ClientVersionManager {
     pub fn load_client_version(download_path: &PathBuf, game_path: &PathBuf) -> Option<String> {
         let app_dirs = AppDirs {
             base_dir: PathBuf::new(),
+            state_path: PathBuf::new(),
             download_path: download_path.clone(),
             game_path: game_path.clone(),
         };

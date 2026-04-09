@@ -27,7 +27,7 @@ impl WindowManager {
 
     /// Carrega o ícone da aplicação
     pub fn load_icon() -> Option<Arc<IconData>> {
-        let icon = include_bytes!("../assets/ultima-logo.ico");
+        let icon = include_bytes!("../assets/penultima-phoenix.ico");
         let (icon_rgba, icon_width, icon_height) = {
             let image = image::load_from_memory(icon).ok()?;
             let image = image.into_rgba8();

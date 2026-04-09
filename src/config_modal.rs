@@ -4,7 +4,7 @@ use eframe::egui;
 use log::info;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 // Opções predefinidas de servidores
@@ -13,6 +13,7 @@ const SERVIDORES_PREDEFINIDOS: [&str; 3] = [
     PREDEFINED_LOGIN_URL_HTTP_8080,
     PREDEFINED_LOGIN_URL_HTTP,
 ];
+const DEFAULT_CONFIG_INI: &str = include_str!("../assets/default-config.ini");
 
 // Estrutura para representar as configurações do jogo
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -49,16 +50,47 @@ pub struct ConfigModal {
 }
 
 impl ConfigModal {
+    fn direct_config_path(game_path: &Path) -> PathBuf {
+        game_path.join("conf").join("config.ini")
+    }
+
+    fn legacy_config_path(game_path: &Path) -> PathBuf {
+        game_path.join("ArcadiaOT").join("conf").join("config.ini")
+    }
+
+    fn resolve_config_path(game_path: &Path) -> PathBuf {
+        let direct_config = Self::direct_config_path(game_path);
+        if direct_config.exists() {
+            return direct_config;
+        }
+
+        let legacy_config = Self::legacy_config_path(game_path);
+        if legacy_config.exists() {
+            return legacy_config;
+        }
+
+        direct_config
+    }
+
+    pub fn ensure_default_config(game_path: &PathBuf) -> Result<PathBuf> {
+        let config_path = Self::resolve_config_path(game_path);
+        if config_path.exists() {
+            return Ok(config_path);
+        }
+
+        if let Some(parent) = config_path.parent() {
+            fs::create_dir_all(parent).context("Falha ao criar diretório de configuração")?;
+        }
+
+        fs::write(&config_path, DEFAULT_CONFIG_INI)
+            .context("Falha ao gravar config.ini padrão")?;
+        Ok(config_path)
+    }
+
     // Cria uma nova instância do ConfigModal
     pub fn new(game_path: PathBuf) -> Self {
-        // Caminho para o arquivo de configuração do cliente
-        let direct_config = game_path.join("conf").join("config.ini");
-        let legacy_config = game_path.join("ArcadiaOT").join("conf").join("config.ini");
-        let config_path = if direct_config.exists() {
-            direct_config
-        } else {
-            legacy_config
-        };
+        let config_path = Self::ensure_default_config(&game_path)
+            .unwrap_or_else(|_| Self::resolve_config_path(&game_path));
 
         info!("Caminho do arquivo de configuração: {:?}", config_path);
 
@@ -150,12 +182,13 @@ impl ConfigModal {
 
     // Salva a configuração no arquivo
     fn save_config(&self) -> Result<()> {
-        // Verificar se o arquivo existe
         if !self.config_path.exists() {
-            return Err(anyhow::anyhow!(
-                "Arquivo de configuração não encontrado: {:?}",
-                self.config_path
-            ));
+            if let Some(parent) = self.config_path.parent() {
+                fs::create_dir_all(parent)
+                    .context("Falha ao criar diretório da configuração do cliente")?;
+            }
+            fs::write(&self.config_path, DEFAULT_CONFIG_INI)
+                .context("Falha ao recriar config.ini padrão")?;
         }
 
         // Ler o conteúdo existente
