@@ -177,7 +177,7 @@ pub const MAIN_WINDOW_SIZE: (f32, f32) = (800.0, 450.0);
 pub const WINDOW_SIZE: (f32, f32) = MAIN_WINDOW_SIZE;
 
 /// Tamanho do logo redimensionado
-pub const LOGO_SIZE: (f32, f32) = (215.0, 150.0);
+pub const LOGO_SIZE: (f32, f32) = (300.0, 300.0);
 
 /// Altura do rodapé
 pub const FOOTER_HEIGHT: f32 = 35.0;

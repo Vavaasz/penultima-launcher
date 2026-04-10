@@ -203,13 +203,16 @@ impl UpdateManager {
 
         let package_changed = force || local_package.trim() != remote.package_raw.trim();
         let assets_changed = force || local_assets_hash.trim() != remote.assets_hash.trim();
+        let has_local_sync_state =
+            !local_package.trim().is_empty() && !local_assets_hash.trim().is_empty();
 
         let files_to_update = if force || package_changed {
             self.collect_changed_files(&remote.package_manifest, force)?
         } else {
             Vec::new()
         };
-        let use_archive_install = self.should_use_archive_install(&files_to_update, force);
+        let use_archive_install =
+            self.should_use_archive_install(&files_to_update, force, has_local_sync_state);
 
         if files_to_update.is_empty() && !assets_changed {
             info!("Cliente ja esta sincronizado com o manifesto remoto");
@@ -327,7 +330,12 @@ impl UpdateManager {
         Ok(changed_files)
     }
 
-    fn should_use_archive_install(&self, files_to_update: &[PackageFile], force: bool) -> bool {
+    fn should_use_archive_install(
+        &self,
+        files_to_update: &[PackageFile],
+        force: bool,
+        has_local_sync_state: bool,
+    ) -> bool {
         if files_to_update.is_empty() {
             return false;
         }
@@ -340,6 +348,7 @@ impl UpdateManager {
 
         force
             || client_missing
+            || !has_local_sync_state
             || files_to_update.len() >= BULK_ARCHIVE_FILE_THRESHOLD
             || total_download_bytes >= BULK_ARCHIVE_BYTE_THRESHOLD
     }
@@ -1047,8 +1056,10 @@ fn hex_nibble(value: u8) -> char {
 
 #[cfg(test)]
 mod tests {
-    use super::{archive_destination_for, archive_relative_path, PackageFile};
+    use super::{PackageFile, UpdateManager, archive_destination_for, archive_relative_path};
+    use std::fs;
     use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn compressed_files_unpack_by_default() {
@@ -1108,6 +1119,40 @@ mod tests {
             Path::new("D:/state"),
         )
         .unwrap();
-        assert_eq!(destination, PathBuf::from("D:/game").join("bin").join("client.exe"));
+        assert_eq!(
+            destination,
+            PathBuf::from("D:/game").join("bin").join("client.exe")
+        );
+    }
+
+    #[test]
+    fn archive_install_is_used_when_launcher_state_is_missing() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("penultima-launcher-test-{unique}"));
+        let game_path = root.join("game");
+        let state_path = root.join("state");
+        let download_path = root.join("downloads");
+
+        fs::create_dir_all(game_path.join("bin")).unwrap();
+        fs::write(game_path.join("bin").join("client.exe"), b"test").unwrap();
+
+        let manager = UpdateManager::new(download_path, game_path, state_path);
+        let files = vec![PackageFile {
+            url: "bin/client.exe".to_string(),
+            localfile: "bin/client.exe".to_string(),
+            packedhash: None,
+            packedsize: Some(4),
+            unpackedhash: None,
+            unpackedsize: None,
+            unpack: Some(false),
+            bootstrap_only: false,
+        }];
+
+        assert!(manager.should_use_archive_install(&files, false, false));
+
+        let _ = fs::remove_dir_all(root);
     }
 }

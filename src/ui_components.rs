@@ -6,8 +6,8 @@ use tokio::sync::mpsc::unbounded_channel;
 use crate::GameLauncher;
 use crate::cache;
 use crate::constants::{
-    ACCENT_PRIMARY_RGB, ACCENT_SECONDARY_RGB, PING_EXCELLENT_THRESHOLD, PING_GOOD_THRESHOLD,
-    SURFACE_RGB,
+    ACCENT_PRIMARY_RGB, ACCENT_SECONDARY_RGB, LOGO_SIZE, PING_EXCELLENT_THRESHOLD,
+    PING_GOOD_THRESHOLD, SURFACE_RGB,
 };
 use crate::message_system::LauncherMessage;
 
@@ -406,7 +406,7 @@ impl GameLauncher {
         ui.add_space(8.0);
 
         if let Some(logo) = &self.logo_texture {
-            let final_size = egui::vec2(250.0, 176.0);
+            let final_size = egui::vec2(LOGO_SIZE.0, LOGO_SIZE.1);
             ui.add(egui::Image::new(egui::ImageSource::Texture(
                 egui::load::SizedTexture::new(logo.id(), final_size),
             )));
