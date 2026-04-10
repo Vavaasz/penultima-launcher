@@ -171,13 +171,13 @@ pub const UI_MESSAGE_DISPLAY_DURATION: Duration = Duration::from_secs(2);
 // ================================
 
 /// Tamanho desejado da janela principal
-pub const MAIN_WINDOW_SIZE: (f32, f32) = (1100.0, 750.0);
+pub const MAIN_WINDOW_SIZE: (f32, f32) = (800.0, 450.0);
 
 /// Tamanho da janela (alias para compatibilidade)
 pub const WINDOW_SIZE: (f32, f32) = MAIN_WINDOW_SIZE;
 
 /// Tamanho do logo redimensionado
-pub const LOGO_SIZE: (f32, f32) = (250.0, 176.0);
+pub const LOGO_SIZE: (f32, f32) = (215.0, 150.0);
 
 /// Altura do rodapé
 pub const FOOTER_HEIGHT: f32 = 35.0;
