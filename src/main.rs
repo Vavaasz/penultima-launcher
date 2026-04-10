@@ -100,11 +100,8 @@ impl Default for GameLauncher {
         let game_client = GameClient::default();
 
         // Carregar configurações do usuário
-        let cache_manager = cache::CacheManager::new(
-            download_path.clone(),
-            game_path.clone(),
-            state_path.clone(),
-        );
+        let cache_manager =
+            cache::CacheManager::new(download_path.clone(), game_path.clone(), state_path.clone());
         let disable_auto_start = cache_manager
             .load_user_settings()
             .map(|settings| settings.disable_auto_start)
@@ -1068,9 +1065,9 @@ impl GameLauncher {
 
     fn load_background(&mut self, ctx: &egui::Context) {
         // Carregar o papel de parede
-        if let Ok(image_data) = image::load_from_memory(include_bytes!(
-            "../assets/background-artwork.png"
-        )) {
+        if let Ok(image_data) =
+            image::load_from_memory(include_bytes!("../assets/background-artwork.png"))
+        {
             let image = image_data.into_rgba8();
             let (width, height) = image.dimensions();
             let rgba = image.into_raw();
@@ -1089,9 +1086,9 @@ impl GameLauncher {
         }
 
         // Carregar o logo
-        if let Ok(logo_data) = image::load_from_memory(include_bytes!(
-            "../assets/penultima-phoenix.png"
-        )) {
+        if let Ok(logo_data) =
+            image::load_from_memory(include_bytes!("../assets/penultima-phoenix.png"))
+        {
             let logo = logo_data.into_rgba8();
 
             let (width, height) = logo.dimensions();

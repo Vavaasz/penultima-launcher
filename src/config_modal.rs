@@ -82,8 +82,7 @@ impl ConfigModal {
             fs::create_dir_all(parent).context("Falha ao criar diretório de configuração")?;
         }
 
-        fs::write(&config_path, DEFAULT_CONFIG_INI)
-            .context("Falha ao gravar config.ini padrão")?;
+        fs::write(&config_path, DEFAULT_CONFIG_INI).context("Falha ao gravar config.ini padrão")?;
         Ok(config_path)
     }
 

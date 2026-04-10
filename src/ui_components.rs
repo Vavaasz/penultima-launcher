@@ -299,7 +299,10 @@ impl GameLauncher {
             egui::Color32::from_rgba_unmultiplied(92, 74, 236, 26),
         );
         ui.painter().circle_filled(
-            egui::pos2(available_rect.left() + 120.0, available_rect.bottom() - 70.0),
+            egui::pos2(
+                available_rect.left() + 120.0,
+                available_rect.bottom() - 70.0,
+            ),
             130.0,
             egui::Color32::from_rgba_unmultiplied(234, 182, 76, 16),
         );
@@ -334,7 +337,12 @@ impl GameLauncher {
             }
 
             if let Some(client_ver) = &self.client_version {
-                metric_row(ui, "Client", format!("v{}", client_ver), egui::Color32::WHITE);
+                metric_row(
+                    ui,
+                    "Client",
+                    format!("v{}", client_ver),
+                    egui::Color32::WHITE,
+                );
             } else {
                 metric_row(
                     ui,
@@ -389,17 +397,8 @@ impl GameLauncher {
                     .strong(),
             );
             ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new(value)
-                    .size(24.0)
-                    .color(tone)
-                    .strong(),
-            );
-            ui.label(
-                egui::RichText::new(detail)
-                    .size(12.5)
-                    .color(muted_text()),
-            );
+            ui.label(egui::RichText::new(value).size(24.0).color(tone).strong());
+            ui.label(egui::RichText::new(detail).size(12.5).color(muted_text()));
         });
     }
 
@@ -415,9 +414,11 @@ impl GameLauncher {
 
         ui.add_space(8.0);
         ui.label(
-            egui::RichText::new("Atualize, confirme o status do servidor e abra o client sem ruido visual.")
-                .size(14.0)
-                .color(muted_text()),
+            egui::RichText::new(
+                "Atualize, confirme o status do servidor e abra o client sem ruido visual.",
+            )
+            .size(14.0)
+            .color(muted_text()),
         );
     }
 

@@ -30,6 +30,10 @@ pub const HTTPS_PORT: u16 = 8443;
 pub const CLIENT_GITHUB_RAW_BASE_URL: &str =
     "https://raw.githubusercontent.com/Vavaasz/penultima-client/main";
 
+/// Arquivo ZIP do feed completo do cliente para bootstrap rapido
+pub const CLIENT_GITHUB_ARCHIVE_URL: &str =
+    "https://codeload.github.com/Vavaasz/penultima-client/zip/refs/heads/main";
+
 /// Manifesto principal do cliente
 pub const CLIENT_PACKAGE_MANIFEST_URL: &str =
     "https://raw.githubusercontent.com/Vavaasz/penultima-client/main/package.json";

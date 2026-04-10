@@ -10,11 +10,20 @@ use std::path::{Path, PathBuf};
 
 use crate::client_version::ClientVersionManager;
 use crate::constants::{
-    CLIENT_ASSET_MANIFEST_HASH_URL, CLIENT_ASSET_MANIFEST_URL, CLIENT_GITHUB_RAW_BASE_URL,
-    CLIENT_PACKAGE_MANIFEST_URL, CLIENT_PACKAGE_VERSION_URL, HTTP_REQUEST_TIMEOUT,
+    CLIENT_ASSET_MANIFEST_HASH_URL, CLIENT_ASSET_MANIFEST_URL, CLIENT_GITHUB_ARCHIVE_URL,
+    CLIENT_GITHUB_RAW_BASE_URL, CLIENT_PACKAGE_MANIFEST_URL, CLIENT_PACKAGE_VERSION_URL,
+    HTTP_REQUEST_TIMEOUT,
 };
 use crate::message_system::LauncherMessage;
 use crate::tokio::sync::mpsc;
+use std::time::{Duration, Instant};
+use zip::ZipArchive;
+
+const BULK_ARCHIVE_FILE_THRESHOLD: usize = 1_500;
+const BULK_ARCHIVE_BYTE_THRESHOLD: u64 = 128 * 1024 * 1024;
+const ARCHIVE_DOWNLOAD_PROGRESS_END: f32 = 0.82;
+const ARCHIVE_EXTRACTION_PROGRESS_END: f32 = 0.98;
+const STATUS_REPORT_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug, Deserialize)]
 struct PackageManifest {
@@ -143,8 +152,10 @@ impl UpdateManager {
         let local_assets_hash =
             read_metadata_file(state_path, game_path, "assets.json.sha256").unwrap_or_default();
 
-        Ok(local_package.unwrap_or_default().trim() != package_raw.trim()
-            || local_assets_hash.unwrap_or_default().trim() != remote_assets_hash.trim())
+        Ok(
+            local_package.unwrap_or_default().trim() != package_raw.trim()
+                || local_assets_hash.unwrap_or_default().trim() != remote_assets_hash.trim(),
+        )
     }
 
     pub async fn check_for_updates(
@@ -198,6 +209,7 @@ impl UpdateManager {
         } else {
             Vec::new()
         };
+        let use_archive_install = self.should_use_archive_install(&files_to_update, force);
 
         if files_to_update.is_empty() && !assets_changed {
             info!("Cliente ja esta sincronizado com o manifesto remoto");
@@ -230,15 +242,20 @@ impl UpdateManager {
             )?;
         }
 
-        for (index, file) in files_to_update.iter().enumerate() {
-            self.download_manifest_file(
-                &download_client,
-                file,
-                index + 1,
-                files_to_update.len(),
-                &message_sender,
-            )
-            .await?;
+        if use_archive_install {
+            self.install_from_archive(&download_client, &message_sender)
+                .await?;
+        } else {
+            for (index, file) in files_to_update.iter().enumerate() {
+                self.download_manifest_file(
+                    &download_client,
+                    file,
+                    index + 1,
+                    files_to_update.len(),
+                    &message_sender,
+                )
+                .await?;
+            }
         }
 
         self.persist_metadata(&remote)?;
@@ -310,8 +327,27 @@ impl UpdateManager {
         Ok(changed_files)
     }
 
+    fn should_use_archive_install(&self, files_to_update: &[PackageFile], force: bool) -> bool {
+        if files_to_update.is_empty() {
+            return false;
+        }
+
+        let client_missing = !self.game_path.join("bin").join("client.exe").exists();
+        let total_download_bytes = files_to_update
+            .iter()
+            .map(|file| file.packedsize.unwrap_or_default())
+            .sum::<u64>();
+
+        force
+            || client_missing
+            || files_to_update.len() >= BULK_ARCHIVE_FILE_THRESHOLD
+            || total_download_bytes >= BULK_ARCHIVE_BYTE_THRESHOLD
+    }
+
     fn load_local_manifest(&self) -> Result<Option<PackageManifest>> {
-        let Some(manifest_raw) = read_metadata_file(&self.state_path, &self.game_path, "package.json")? else {
+        let Some(manifest_raw) =
+            read_metadata_file(&self.state_path, &self.game_path, "package.json")?
+        else {
             return Ok(None);
         };
 
@@ -480,6 +516,51 @@ impl UpdateManager {
         Ok(())
     }
 
+    async fn install_from_archive(
+        &self,
+        http_client: &reqwest::Client,
+        message_sender: &mpsc::UnboundedSender<LauncherMessage>,
+    ) -> Result<()> {
+        fs::create_dir_all(&self.state_path)?;
+        fs::create_dir_all(&self.game_path)?;
+
+        let archive_path = self.state_path.join("client-feed.bootstrap.zip");
+
+        send_message(
+            message_sender,
+            LauncherMessage::SetStatus("Baixando pacote completo do cliente...".to_string()),
+        )?;
+
+        download_to_path_with_progress(
+            http_client,
+            CLIENT_GITHUB_ARCHIVE_URL,
+            &archive_path,
+            Some(message_sender),
+            "Baixando pacote completo do cliente",
+            0.0,
+            ARCHIVE_DOWNLOAD_PROGRESS_END,
+        )
+        .await?;
+
+        send_message(
+            message_sender,
+            LauncherMessage::SetStatus("Extraindo pacote completo do cliente...".to_string()),
+        )?;
+
+        let extraction_result = extract_client_archive(
+            &archive_path,
+            &self.game_path,
+            &self.state_path,
+            message_sender,
+        );
+
+        if archive_path.exists() {
+            let _ = fs::remove_file(&archive_path);
+        }
+
+        extraction_result
+    }
+
     fn persist_metadata(&self, remote: &RemoteMetadata) -> Result<()> {
         fs::create_dir_all(&self.state_path)?;
         fs::write(self.package_manifest_path(), &remote.package_raw)?;
@@ -600,6 +681,18 @@ async fn download_to_path(
     url: &str,
     destination: &Path,
 ) -> Result<()> {
+    download_to_path_with_progress(http_client, url, destination, None, "", 0.0, 0.0).await
+}
+
+async fn download_to_path_with_progress(
+    http_client: &reqwest::Client,
+    url: &str,
+    destination: &Path,
+    message_sender: Option<&mpsc::UnboundedSender<LauncherMessage>>,
+    status_prefix: &str,
+    progress_start: f32,
+    progress_end: f32,
+) -> Result<()> {
     if destination.exists() {
         fs::remove_file(destination)?;
     }
@@ -612,16 +705,53 @@ async fn download_to_path(
         .error_for_status()
         .with_context(|| format!("Download rejeitado por {}", url))?;
 
+    let total_bytes = response.content_length();
     let mut stream = response.bytes_stream();
     let mut file = File::create(destination)
         .with_context(|| format!("Falha ao criar {}", destination.display()))?;
+    let started_at = Instant::now();
+    let mut downloaded_bytes = 0u64;
+    let mut last_report_at = Instant::now()
+        .checked_sub(STATUS_REPORT_INTERVAL)
+        .unwrap_or_else(Instant::now);
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.with_context(|| format!("Erro ao ler dados de {}", url))?;
         file.write_all(&chunk)?;
+        downloaded_bytes += chunk.len() as u64;
+
+        if let Some(sender) = message_sender {
+            let should_report = last_report_at.elapsed() >= STATUS_REPORT_INTERVAL
+                || total_bytes == Some(downloaded_bytes);
+            if should_report {
+                report_download_progress(
+                    sender,
+                    status_prefix,
+                    downloaded_bytes,
+                    total_bytes,
+                    started_at,
+                    progress_start,
+                    progress_end,
+                )?;
+                last_report_at = Instant::now();
+            }
+        }
     }
 
     file.flush()?;
+
+    if let Some(sender) = message_sender {
+        report_download_progress(
+            sender,
+            status_prefix,
+            downloaded_bytes,
+            total_bytes,
+            started_at,
+            progress_start,
+            progress_end,
+        )?;
+    }
+
     Ok(())
 }
 
@@ -639,6 +769,221 @@ fn temporary_path(target_path: &Path, suffix: &str) -> PathBuf {
         .map(|value| value.to_string_lossy().to_string())
         .unwrap_or_else(|| "download".to_string());
     target_path.with_file_name(format!("{file_name}.{suffix}.tmp"))
+}
+
+fn extract_client_archive(
+    archive_path: &Path,
+    game_path: &Path,
+    state_path: &Path,
+    message_sender: &mpsc::UnboundedSender<LauncherMessage>,
+) -> Result<()> {
+    let archive_file = File::open(archive_path)
+        .with_context(|| format!("Falha ao abrir {}", archive_path.display()))?;
+    let mut archive =
+        ZipArchive::new(archive_file).context("Falha ao ler o pacote ZIP do cliente")?;
+
+    let mut relevant_entries = Vec::new();
+    let mut total_bytes = 0u64;
+
+    for index in 0..archive.len() {
+        let entry = archive
+            .by_index(index)
+            .with_context(|| format!("Falha ao ler entrada {} do ZIP", index))?;
+        if entry.is_dir() {
+            continue;
+        }
+
+        let Some(relative_path) = archive_relative_path(entry.name()) else {
+            continue;
+        };
+        let Some(destination) = archive_destination_for(&relative_path, game_path, state_path)
+        else {
+            continue;
+        };
+
+        total_bytes += entry.size();
+        relevant_entries.push((index, relative_path, destination, entry.size()));
+    }
+
+    if relevant_entries.is_empty() {
+        return Err(anyhow!(
+            "O pacote completo do cliente nao contem arquivos instalaveis"
+        ));
+    }
+
+    let mut extracted_bytes = 0u64;
+    let mut last_report_at = Instant::now()
+        .checked_sub(STATUS_REPORT_INTERVAL)
+        .unwrap_or_else(Instant::now);
+
+    for (position, (index, relative_path, destination, entry_size)) in
+        relevant_entries.iter().enumerate()
+    {
+        let mut entry = archive
+            .by_index(*index)
+            .with_context(|| format!("Falha ao reabrir entrada {} do ZIP", index))?;
+
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Falha ao criar diretorio {}", parent.display()))?;
+        }
+
+        let temp_path = temporary_path(destination, "archive");
+        if temp_path.exists() {
+            fs::remove_file(&temp_path)?;
+        }
+
+        let mut output = File::create(&temp_path)
+            .with_context(|| format!("Falha ao criar {}", temp_path.display()))?;
+        std::io::copy(&mut entry, &mut output).with_context(|| {
+            format!(
+                "Falha ao extrair {} para {}",
+                relative_path.display(),
+                destination.display()
+            )
+        })?;
+        output.flush()?;
+        replace_file(&temp_path, destination)?;
+
+        extracted_bytes += *entry_size;
+
+        let should_report = last_report_at.elapsed() >= STATUS_REPORT_INTERVAL
+            || position + 1 == relevant_entries.len();
+        if should_report {
+            let progress = if total_bytes == 0 {
+                ARCHIVE_EXTRACTION_PROGRESS_END
+            } else {
+                let fraction = extracted_bytes as f32 / total_bytes as f32;
+                ARCHIVE_DOWNLOAD_PROGRESS_END
+                    + fraction.clamp(0.0, 1.0)
+                        * (ARCHIVE_EXTRACTION_PROGRESS_END - ARCHIVE_DOWNLOAD_PROGRESS_END)
+            };
+
+            send_message(
+                message_sender,
+                LauncherMessage::SetStatus(format!(
+                    "Extraindo pacote completo do cliente... {}/{} arquivos",
+                    position + 1,
+                    relevant_entries.len()
+                )),
+            )?;
+            send_message(
+                message_sender,
+                LauncherMessage::DownloadProgress(progress.min(ARCHIVE_EXTRACTION_PROGRESS_END)),
+            )?;
+            last_report_at = Instant::now();
+        }
+    }
+
+    Ok(())
+}
+
+fn archive_relative_path(entry_name: &str) -> Option<PathBuf> {
+    let normalized = entry_name.replace('\\', "/");
+    let mut parts = normalized.split('/').filter(|part| !part.is_empty());
+
+    parts.next()?;
+
+    let mut relative_path = PathBuf::new();
+    for part in parts {
+        if part == "." {
+            continue;
+        }
+        if part == ".." {
+            return None;
+        }
+        relative_path.push(part);
+    }
+
+    if relative_path.as_os_str().is_empty() {
+        None
+    } else {
+        Some(relative_path)
+    }
+}
+
+fn archive_destination_for(
+    relative_path: &Path,
+    game_path: &Path,
+    state_path: &Path,
+) -> Option<PathBuf> {
+    let normalized = relative_path.to_string_lossy().replace('\\', "/");
+
+    match normalized.as_str() {
+        "package.json" | "package.json.version" | "assets.json" | "assets.json.sha256" => {
+            Some(state_path.join(relative_path.file_name()?))
+        }
+        _ if normalized.starts_with("assets/")
+            || normalized.starts_with("bin/")
+            || normalized.starts_with("sounds/") =>
+        {
+            Some(game_path.join(relative_path))
+        }
+        _ => None,
+    }
+}
+
+fn report_download_progress(
+    sender: &mpsc::UnboundedSender<LauncherMessage>,
+    status_prefix: &str,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    started_at: Instant,
+    progress_start: f32,
+    progress_end: f32,
+) -> Result<()> {
+    if status_prefix.is_empty() {
+        return Ok(());
+    }
+
+    let elapsed_secs = started_at.elapsed().as_secs_f64().max(0.1);
+    let bytes_per_second = downloaded_bytes as f64 / elapsed_secs;
+    let status = if let Some(total_bytes) = total_bytes {
+        format!(
+            "{}... {} / {} ({}/s)",
+            status_prefix,
+            format_bytes(downloaded_bytes),
+            format_bytes(total_bytes),
+            format_bytes(bytes_per_second as u64)
+        )
+    } else {
+        format!(
+            "{}... {} ({}/s)",
+            status_prefix,
+            format_bytes(downloaded_bytes),
+            format_bytes(bytes_per_second as u64)
+        )
+    };
+
+    send_message(sender, LauncherMessage::SetStatus(status))?;
+
+    if let Some(total_bytes) = total_bytes {
+        if total_bytes > 0 {
+            let fraction = downloaded_bytes as f32 / total_bytes as f32;
+            let progress =
+                progress_start + fraction.clamp(0.0, 1.0) * (progress_end - progress_start);
+            send_message(sender, LauncherMessage::DownloadProgress(progress))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+
+    let mut value = bytes as f64;
+    let mut unit_index = 0usize;
+    while value >= 1024.0 && unit_index < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit_index += 1;
+    }
+
+    if unit_index == 0 {
+        format!("{} {}", bytes, UNITS[unit_index])
+    } else {
+        format!("{value:.1} {}", UNITS[unit_index])
+    }
 }
 
 fn replace_file(source: &Path, destination: &Path) -> Result<()> {
@@ -702,7 +1047,8 @@ fn hex_nibble(value: u8) -> char {
 
 #[cfg(test)]
 mod tests {
-    use super::PackageFile;
+    use super::{archive_destination_for, archive_relative_path, PackageFile};
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn compressed_files_unpack_by_default() {
@@ -734,5 +1080,34 @@ mod tests {
         };
 
         assert!(!file.should_unpack());
+    }
+
+    #[test]
+    fn archive_relative_path_strips_top_level_directory() {
+        let relative =
+            archive_relative_path("Vavaasz-penultima-client-123/assets/test.dat").unwrap();
+        assert_eq!(relative, PathBuf::from("assets").join("test.dat"));
+    }
+
+    #[test]
+    fn archive_destination_routes_metadata_to_state_dir() {
+        let destination = archive_destination_for(
+            Path::new("package.json"),
+            Path::new("D:/game"),
+            Path::new("D:/state"),
+        )
+        .unwrap();
+        assert_eq!(destination, PathBuf::from("D:/state").join("package.json"));
+    }
+
+    #[test]
+    fn archive_destination_routes_runtime_files_to_game_dir() {
+        let destination = archive_destination_for(
+            Path::new("bin/client.exe"),
+            Path::new("D:/game"),
+            Path::new("D:/state"),
+        )
+        .unwrap();
+        assert_eq!(destination, PathBuf::from("D:/game").join("bin").join("client.exe"));
     }
 }

@@ -7,8 +7,8 @@ use std::path::PathBuf;
 
 /// Estrutura para gerenciar os diretórios da aplicação
 pub struct AppDirs {
-    pub base_dir: PathBuf, // Diretório base único
-    pub state_path: PathBuf, // Estado interno do launcher
+    pub base_dir: PathBuf,      // Diretório base único
+    pub state_path: PathBuf,    // Estado interno do launcher
     pub download_path: PathBuf, // Subdiretório para downloads
     pub game_path: PathBuf,     // Subdiretório para arquivos do jogo
 }
