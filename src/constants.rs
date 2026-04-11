@@ -129,6 +129,7 @@ pub const PING_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Timeout para requisições HTTP
 pub const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+pub const HTTP_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// Intervalo para verificação de instâncias
 pub const INSTANCE_CHECK_INTERVAL: Duration = Duration::from_secs(1);

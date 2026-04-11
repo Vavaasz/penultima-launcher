@@ -606,9 +606,13 @@ impl GameLauncher {
                                         state_path,
                                     );
                                     if let Err(e) = update_manager
-                                        .check_for_updates(message_tx, disable_auto_start)
+                                        .check_for_updates(message_tx.clone(), disable_auto_start)
                                         .await
                                     {
+                                        let _ = message_tx.send(LauncherMessage::Error(format!(
+                                            "Erro ao iniciar download automático: {:#}",
+                                            e
+                                        )));
                                         info!("Erro ao iniciar download automático: {}", e);
                                     }
                                 });
