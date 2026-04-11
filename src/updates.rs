@@ -3,10 +3,12 @@ use futures_util::StreamExt;
 use log::info;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{BufReader, Read, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::process::Command;
 
 use crate::client_version::ClientVersionManager;
 use crate::constants::{
@@ -561,6 +563,7 @@ impl UpdateManager {
             &self.game_path,
             &self.state_path,
             message_sender,
+            !self.game_path.join("bin").join("client.exe").exists(),
         );
 
         if archive_path.exists() {
@@ -785,7 +788,14 @@ fn extract_client_archive(
     game_path: &Path,
     state_path: &Path,
     message_sender: &mpsc::UnboundedSender<LauncherMessage>,
+    prefer_native_extract: bool,
 ) -> Result<()> {
+    if prefer_native_extract
+        && try_extract_client_archive_natively(archive_path, game_path, message_sender)?
+    {
+        return Ok(());
+    }
+
     let archive_file = File::open(archive_path)
         .with_context(|| format!("Falha ao abrir {}", archive_path.display()))?;
     let mut archive =
@@ -821,6 +831,7 @@ fn extract_client_archive(
     }
 
     let mut extracted_bytes = 0u64;
+    let mut created_directories = HashSet::new();
     let mut last_report_at = Instant::now()
         .checked_sub(STATUS_REPORT_INTERVAL)
         .unwrap_or_else(Instant::now);
@@ -833,26 +844,46 @@ fn extract_client_archive(
             .with_context(|| format!("Falha ao reabrir entrada {} do ZIP", index))?;
 
         if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Falha ao criar diretorio {}", parent.display()))?;
+            if created_directories.insert(parent.to_path_buf()) {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("Falha ao criar diretorio {}", parent.display()))?;
+            }
         }
 
-        let temp_path = temporary_path(destination, "archive");
-        if temp_path.exists() {
-            fs::remove_file(&temp_path)?;
-        }
+        if prefer_native_extract {
+            let mut output = BufWriter::with_capacity(
+                256 * 1024,
+                File::create(destination)
+                    .with_context(|| format!("Falha ao criar {}", destination.display()))?,
+            );
+            std::io::copy(&mut entry, &mut output).with_context(|| {
+                format!(
+                    "Falha ao extrair {} para {}",
+                    relative_path.display(),
+                    destination.display()
+                )
+            })?;
+        } else {
+            let temp_path = temporary_path(destination, "archive");
+            if temp_path.exists() {
+                fs::remove_file(&temp_path)?;
+            }
 
-        let mut output = File::create(&temp_path)
-            .with_context(|| format!("Falha ao criar {}", temp_path.display()))?;
-        std::io::copy(&mut entry, &mut output).with_context(|| {
-            format!(
-                "Falha ao extrair {} para {}",
-                relative_path.display(),
-                destination.display()
-            )
-        })?;
-        output.flush()?;
-        replace_file(&temp_path, destination)?;
+            let mut output = BufWriter::with_capacity(
+                256 * 1024,
+                File::create(&temp_path)
+                    .with_context(|| format!("Falha ao criar {}", temp_path.display()))?,
+            );
+            std::io::copy(&mut entry, &mut output).with_context(|| {
+                format!(
+                    "Falha ao extrair {} para {}",
+                    relative_path.display(),
+                    destination.display()
+                )
+            })?;
+            output.flush()?;
+            replace_file(&temp_path, destination)?;
+        }
 
         extracted_bytes += *entry_size;
 
@@ -887,6 +918,88 @@ fn extract_client_archive(
     Ok(())
 }
 
+#[cfg(windows)]
+fn try_extract_client_archive_natively(
+    archive_path: &Path,
+    game_path: &Path,
+    message_sender: &mpsc::UnboundedSender<LauncherMessage>,
+) -> Result<bool> {
+    if !archive_is_native_extract_safe(archive_path)? {
+        info!("Pacote bootstrap nao passou na validacao para extracao nativa; usando fallback Rust");
+        return Ok(false);
+    }
+
+    send_message(
+        message_sender,
+        LauncherMessage::SetStatus(
+            "Extraindo pacote completo do cliente com extrator nativo do Windows..."
+                .to_string(),
+        ),
+    )?;
+
+    let status = Command::new("tar.exe")
+        .arg("-xf")
+        .arg(archive_path)
+        .arg("-C")
+        .arg(game_path)
+        .status();
+
+    let Ok(status) = status else {
+        info!("Falha ao iniciar tar.exe; usando fallback Rust");
+        return Ok(false);
+    };
+
+    if !status.success() {
+        info!(
+            "tar.exe retornou status {:?}; usando fallback Rust",
+            status.code()
+        );
+        return Ok(false);
+    }
+
+    send_message(
+        message_sender,
+        LauncherMessage::DownloadProgress(ARCHIVE_EXTRACTION_PROGRESS_END),
+    )?;
+
+    Ok(true)
+}
+
+#[cfg(not(windows))]
+fn try_extract_client_archive_natively(
+    _archive_path: &Path,
+    _game_path: &Path,
+    _message_sender: &mpsc::UnboundedSender<LauncherMessage>,
+) -> Result<bool> {
+    Ok(false)
+}
+
+fn archive_is_native_extract_safe(archive_path: &Path) -> Result<bool> {
+    let archive_file = File::open(archive_path)
+        .with_context(|| format!("Falha ao abrir {}", archive_path.display()))?;
+    let mut archive =
+        ZipArchive::new(archive_file).context("Falha ao validar o pacote ZIP do cliente")?;
+
+    for index in 0..archive.len() {
+        let entry = archive
+            .by_index(index)
+            .with_context(|| format!("Falha ao ler entrada {} do ZIP", index))?;
+        if entry.is_dir() {
+            continue;
+        }
+
+        let Some(relative_path) = archive_relative_path(entry.name()) else {
+            return Ok(false);
+        };
+
+        if !archive_relative_path_is_extractable_at_game_root(&relative_path) {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
 fn archive_relative_path(entry_name: &str) -> Option<PathBuf> {
     let normalized = entry_name.replace('\\', "/");
     let parts: Vec<&str> = normalized.split('/').filter(|part| !part.is_empty()).collect();
@@ -896,7 +1009,16 @@ fn archive_relative_path(entry_name: &str) -> Option<PathBuf> {
 
     let payload_starts_at_root = matches!(
         parts.first().copied(),
-        Some("assets" | "bin" | "sounds" | "package.json" | "package.json.version" | "assets.json" | "assets.json.sha256")
+        Some(
+            "assets"
+                | "bin"
+                | "conf"
+                | "sounds"
+                | "package.json"
+                | "package.json.version"
+                | "assets.json"
+                | "assets.json.sha256"
+        )
     );
 
     let start_index = if payload_starts_at_root { 0 } else { 1 };
@@ -935,12 +1057,25 @@ fn archive_destination_for(
         }
         _ if normalized.starts_with("assets/")
             || normalized.starts_with("bin/")
+            || normalized.starts_with("conf/")
             || normalized.starts_with("sounds/") =>
         {
             Some(game_path.join(relative_path))
         }
         _ => None,
     }
+}
+
+fn archive_relative_path_is_extractable_at_game_root(relative_path: &Path) -> bool {
+    let normalized = relative_path.to_string_lossy().replace('\\', "/");
+
+    matches!(
+        normalized.as_str(),
+        "package.json" | "package.json.version" | "assets.json" | "assets.json.sha256"
+    ) || normalized.starts_with("assets/")
+        || normalized.starts_with("bin/")
+        || normalized.starts_with("conf/")
+        || normalized.starts_with("sounds/")
 }
 
 fn report_download_progress(
@@ -1067,7 +1202,10 @@ fn hex_nibble(value: u8) -> char {
 
 #[cfg(test)]
 mod tests {
-    use super::{PackageFile, UpdateManager, archive_destination_for, archive_relative_path};
+    use super::{
+        PackageFile, UpdateManager, archive_destination_for, archive_relative_path,
+        archive_relative_path_is_extractable_at_game_root,
+    };
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1118,6 +1256,12 @@ mod tests {
     }
 
     #[test]
+    fn archive_relative_path_accepts_conf_without_top_level_directory() {
+        let relative = archive_relative_path("conf/config.ini").unwrap();
+        assert_eq!(relative, PathBuf::from("conf").join("config.ini"));
+    }
+
+    #[test]
     fn archive_destination_routes_metadata_to_state_dir() {
         let destination = archive_destination_for(
             Path::new("package.json"),
@@ -1140,6 +1284,27 @@ mod tests {
             destination,
             PathBuf::from("D:/game").join("bin").join("client.exe")
         );
+    }
+
+    #[test]
+    fn archive_destination_routes_conf_files_to_game_dir() {
+        let destination = archive_destination_for(
+            Path::new("conf/config.ini"),
+            Path::new("D:/game"),
+            Path::new("D:/state"),
+        )
+        .unwrap();
+        assert_eq!(
+            destination,
+            PathBuf::from("D:/game").join("conf").join("config.ini")
+        );
+    }
+
+    #[test]
+    fn native_extract_validation_accepts_conf_files() {
+        assert!(archive_relative_path_is_extractable_at_game_root(Path::new(
+            "conf/config.ini"
+        )));
     }
 
     #[test]
