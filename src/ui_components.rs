@@ -398,8 +398,8 @@ impl GameLauncher {
                 if ui
                     .add_sized(
                         [150.0, 30.0],
-                        egui::Button::new(
-                            egui::RichText::new("Minimizar no Tray")
+                            egui::Button::new(
+                            egui::RichText::new("Minimizar launcher")
                                 .size(14.0)
                                 .color(egui::Color32::from_rgb(220, 220, 220)),
                         )
@@ -577,8 +577,6 @@ impl GameLauncher {
                             }
                         });
 
-                        ui.add_space(10.0);
-                        self.proxy_status.render_status_indicators(ui);
                     });
                 });
         }

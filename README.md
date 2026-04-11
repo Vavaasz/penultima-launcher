@@ -8,6 +8,7 @@ What it does:
 - only updates managed client folders: `assets`, `bin`, and `sounds`
 - keeps launcher state in AppData instead of writing manifests into the client root
 - starts the client with production defaults for `ultimaotserv.online`
+- minimizes the launcher itself to the system tray
 
 For players:
 
@@ -30,3 +31,8 @@ powershell -ExecutionPolicy Bypass -File .\publish-launcher-release.ps1
 The first command rebuilds the public client feed from `D:\Server\Cliente-15.23-Prod`.
 
 The second command rebuilds the launcher release and writes `D:\Server\_publish\Penultima-Launcher.zip`.
+
+Release policy:
+
+- public launcher builds should be Authenticode-signed before publishing
+- `publish-launcher-release.ps1` now refuses unsigned public builds unless `-AllowUnsigned` is used for local-only testing

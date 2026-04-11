@@ -5,15 +5,13 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use eframe::egui;
 use image;
-use log::{info, warn};
+use log::info;
 use std::fs::{self};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio;
-use windows::Win32::Foundation::HWND;
-
 mod app_dirs;
 mod cache;
 mod cli;
@@ -24,9 +22,6 @@ mod game_client;
 mod instance_manager;
 mod logger;
 mod message_system;
-mod proxy;
-mod proxy_status;
-mod system;
 mod tray_manager;
 mod ui_components;
 mod updates;
@@ -41,7 +36,6 @@ use constants::*;
 use game_client::{GameClient, WindowState};
 use instance_manager::InstanceManager;
 use message_system::LauncherMessage;
-use proxy_status::ProxyStatus;
 use tray_manager::{TrayAction, TrayManager};
 use window_manager::WindowManager;
 
@@ -62,7 +56,6 @@ struct GameLauncher {
     needs_repaint: Arc<AtomicBool>,
     initialized: bool,
     auto_hide: bool, // Flag para controlar o auto-hide do launcher
-    proxy_status: ProxyStatus,
     temp_message_time: Option<Instant>, // Momento em que uma mensagem temporária foi definida
     is_alert_message: bool,             // Flag para mensagens de alerta que devem ser destacadas
     is_closing_attempted: bool, // Nova flag para indicar que o usuário tentou fechar a janela
@@ -124,7 +117,6 @@ impl Default for GameLauncher {
             needs_repaint: Arc::new(AtomicBool::new(false)),
             initialized: false,
             auto_hide: false, // O launcher só vai para a tray quando o usuário pedir
-            proxy_status: ProxyStatus::new(), // Usar o construtor explícito
             temp_message_time: None,
             is_alert_message: false,
             is_closing_attempted: false,
@@ -167,13 +159,6 @@ impl GameLauncher {
         self.tray_manager.as_mut()
     }
 
-    fn has_hidden_clients(&self) -> bool {
-        self.tray_manager
-            .as_ref()
-            .map(|tray_manager| tray_manager.has_hidden_clients())
-            .unwrap_or(false)
-    }
-
     fn hide_launcher_to_tray(&mut self, _ctx: &egui::Context) {
         {
             let mut state = self.window_state.lock().unwrap();
@@ -211,20 +196,6 @@ impl GameLauncher {
         ctx.request_repaint();
     }
 
-    fn restore_all_clients_from_tray(&mut self) {
-        let hwnds = self
-            .tray_manager_mut()
-            .map(|tray_manager| tray_manager.restore_all_hidden_clients())
-            .unwrap_or_default();
-        let restored = GameClient::restore_windows(&hwnds);
-
-        if restored > 0 {
-            self.status = "Clientes restaurados da system tray".to_string();
-            self.temp_message_time = Some(Instant::now());
-            self.is_alert_message = false;
-        }
-    }
-
     fn handle_tray_events(&mut self, ctx: &egui::Context) {
         let actions = self
             .tray_manager
@@ -235,22 +206,7 @@ impl GameLauncher {
         for action in actions {
             match action {
                 TrayAction::ShowLauncher => self.restore_launcher_from_tray(ctx),
-                TrayAction::RestoreAllClients => self.restore_all_clients_from_tray(),
-                TrayAction::RestoreClient(hwnd_raw) => {
-                    let hwnd = HWND(hwnd_raw as *mut _);
-                    if GameClient::restore_window(hwnd) {
-                        if let Some(tray_manager) = self.tray_manager_mut() {
-                            tray_manager.remove_hidden_client(hwnd);
-                        }
-                        self.status = "Cliente restaurado da system tray".to_string();
-                        self.temp_message_time = Some(Instant::now());
-                        self.is_alert_message = false;
-                    }
-                }
-                TrayAction::QuitLauncher => {
-                    self.restore_all_clients_from_tray();
-                    std::process::exit(0);
-                }
+                TrayAction::QuitLauncher => std::process::exit(0),
             }
         }
     }
@@ -441,38 +397,8 @@ impl GameLauncher {
     }
 
     fn minimize_to_tray(&mut self, ctx: &egui::Context) {
-        let hidden_clients = match self
-            .game_client
-            .minimize_declared_clients_to_tray(&self.game_path)
-        {
-            Ok(hidden_windows) => {
-                if let Some(tray_manager) = self.tray_manager_mut() {
-                    if let Err(error) = tray_manager.register_hidden_clients(&hidden_windows) {
-                        self.status = format!("Erro ao criar ícones da tray: {}", error);
-                        self.temp_message_time = Some(Instant::now());
-                        self.is_alert_message = true;
-                        ctx.request_repaint();
-                        return;
-                    }
-                }
-                hidden_windows.len()
-            }
-            Err(error) => {
-                self.status = format!("Erro ao localizar clients: {}", error);
-                self.temp_message_time = Some(Instant::now());
-                self.is_alert_message = true;
-                ctx.request_repaint();
-                return;
-            }
-        };
-
         self.hide_launcher_to_tray(ctx);
-
-        self.status = if hidden_clients > 0 {
-            "Launcher e clientes enviados para a system tray".to_string()
-        } else {
-            "Launcher enviado para a system tray".to_string()
-        };
+        self.status = "Launcher enviado para a system tray".to_string();
         self.temp_message_time = Some(Instant::now());
         self.is_alert_message = false;
         ctx.request_repaint();
@@ -504,9 +430,6 @@ impl GameLauncher {
     fn custom_update(&mut self, ctx: &egui::Context) {
         // === Fast path: quando a janela está escondida no tray, fazer apenas trabalho essencial ===
         self.handle_tray_events(ctx);
-        if let Some(tray_manager) = self.tray_manager_mut() {
-            tray_manager.cleanup_hidden_clients();
-        }
 
         let (is_visible, recently_shown) = {
             let state = self.window_state.lock().unwrap();
@@ -1138,11 +1061,6 @@ async fn main() -> Result<()> {
     // No início do seu main.rs depois de inicializar o logger
     logger::initialize(args.console);
 
-    // Configurar prioridade alta para o processo
-    if let Err(e) = system::set_process_priority(true) {
-        warn!("[MAIN] Erro ao configurar prioridade do processo: {}", e);
-    }
-
     // Inicializar o gerenciador de instância
     let mut instance_manager = InstanceManager::new(INSTANCE_NAME);
 
@@ -1182,7 +1100,6 @@ async fn main() -> Result<()> {
     window_manager.show_window();
 
     // Configurar o ícone da bandeja usando o TrayManager
-    let tracked_client_pids = Arc::new(Mutex::new(Vec::new()));
     let mut tray_manager = TrayManager::new();
     tray_manager.setup(window_state.clone())?;
 
@@ -1196,17 +1113,6 @@ async fn main() -> Result<()> {
 
     // Iniciar o monitor de sinal para exibição da janela
     instance_manager.start_signal_monitor(signal_path, window_state.clone());
-
-    // let config = Arc::new(proxy::ProxyConfig::default());
-
-    // // Iniciar o proxy em uma nova task
-    // info!("Iniciando proxy do jogo...");
-    // let proxy_config = config.clone();
-    // tokio::spawn(async move {
-    //     if let Err(e) = proxy::run_proxy(proxy_config).await {
-    //         einfo!("Erro ao executar o proxy: {}", e);
-    //     }
-    // });
 
     // Esperar um pouco para os serviços iniciarem
     tokio::time::sleep(STARTUP_DELAY).await;
@@ -1247,12 +1153,10 @@ async fn main() -> Result<()> {
             cc.egui_ctx.set_style(style);
 
             let mut launcher = GameLauncher::default();
-            launcher.game_client = GameClient::new(MAX_CLIENTS, tracked_client_pids.clone());
+            launcher.game_client = GameClient::new(MAX_CLIENTS);
             launcher.window_state = window_state;
             launcher.initialized = false;
             launcher.auto_hide = args.auto_hide;
-            // let config_clone = config.clone();
-            // launcher.proxy_status.update_status(&config_clone);
             launcher.window_manager = Some(window_manager);
             launcher.tray_manager = Some(tray_manager);
 
@@ -1273,17 +1177,6 @@ impl eframe::App for GameLauncher {
         // Interceptar evento de fechamento
         if ctx.input(|i| i.viewport().close_requested()) {
             info!("Evento de fechamento detectado!");
-            if self.has_hidden_clients() {
-                self.restore_all_clients_from_tray();
-                self.restore_launcher_from_tray(ctx);
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                self.status = "Clientes restaurados antes de fechar o launcher".to_string();
-                self.temp_message_time = Some(Instant::now());
-                self.is_alert_message = false;
-                ctx.request_repaint();
-                return;
-            }
-
             // Verifica se há clientes ativos
             let (has_main, additional_count) = self.game_client.sync_client_state();
             if has_main || additional_count > 0 {
