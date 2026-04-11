@@ -1,7 +1,9 @@
 param(
   [switch]$AllowUnsigned,
   [string]$CertificateThumbprint = $env:PENULTIMA_SIGN_CERT_THUMBPRINT,
-  [string]$TimestampUrl = $(if ($env:PENULTIMA_SIGN_TIMESTAMP_URL) { $env:PENULTIMA_SIGN_TIMESTAMP_URL } else { "http://timestamp.digicert.com" })
+  [string]$TimestampUrl = $(if ($env:PENULTIMA_SIGN_TIMESTAMP_URL) { $env:PENULTIMA_SIGN_TIMESTAMP_URL } else { "http://timestamp.digicert.com" }),
+  [string]$ReleaseDir = "D:\Server\_publish\penultima-launcher-release",
+  [string]$ZipPath = "D:\Server\_publish\Penultima-Launcher.zip"
 )
 
 $ErrorActionPreference = "Stop"
@@ -40,8 +42,6 @@ if (-not (Test-Path $cargo)) {
 }
 
 $root = "D:\Server\Launcher"
-$releaseDir = "D:\Server\_publish\penultima-launcher-release"
-$zipPath = "D:\Server\_publish\Penultima-Launcher.zip"
 $exeSource = Join-Path $root "target\release\penultima-launcher.exe"
 $exeTarget = Join-Path $releaseDir "penultima-launcher.exe"
 

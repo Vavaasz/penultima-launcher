@@ -889,16 +889,27 @@ fn extract_client_archive(
 
 fn archive_relative_path(entry_name: &str) -> Option<PathBuf> {
     let normalized = entry_name.replace('\\', "/");
-    let mut parts = normalized.split('/').filter(|part| !part.is_empty());
+    let parts: Vec<&str> = normalized.split('/').filter(|part| !part.is_empty()).collect();
+    if parts.is_empty() {
+        return None;
+    }
 
-    parts.next()?;
+    let payload_starts_at_root = matches!(
+        parts.first().copied(),
+        Some("assets" | "bin" | "sounds" | "package.json" | "package.json.version" | "assets.json" | "assets.json.sha256")
+    );
+
+    let start_index = if payload_starts_at_root { 0 } else { 1 };
+    if start_index >= parts.len() {
+        return None;
+    }
 
     let mut relative_path = PathBuf::new();
-    for part in parts {
-        if part == "." {
+    for part in &parts[start_index..] {
+        if *part == "." {
             continue;
         }
-        if part == ".." {
+        if *part == ".." {
             return None;
         }
         relative_path.push(part);
@@ -1097,6 +1108,12 @@ mod tests {
     fn archive_relative_path_strips_top_level_directory() {
         let relative =
             archive_relative_path("Vavaasz-penultima-client-123/assets/test.dat").unwrap();
+        assert_eq!(relative, PathBuf::from("assets").join("test.dat"));
+    }
+
+    #[test]
+    fn archive_relative_path_accepts_archives_without_top_level_directory() {
+        let relative = archive_relative_path("assets/test.dat").unwrap();
         assert_eq!(relative, PathBuf::from("assets").join("test.dat"));
     }
 

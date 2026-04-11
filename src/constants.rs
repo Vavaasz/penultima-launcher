@@ -26,29 +26,29 @@ pub const HTTPS_PORT: u16 = 8443;
 // URLS E ENDPOINTS
 // ================================
 
-/// URL base do cliente declarado no GitHub
+/// URL base do feed publico do cliente hospedado no site
 pub const CLIENT_GITHUB_RAW_BASE_URL: &str =
-    "https://raw.githubusercontent.com/Vavaasz/penultima-client/main";
+    "https://ultimaotserv.online/downloads/client-feed";
 
 /// Arquivo ZIP do feed completo do cliente para bootstrap rapido
 pub const CLIENT_GITHUB_ARCHIVE_URL: &str =
-    "https://codeload.github.com/Vavaasz/penultima-client/zip/refs/heads/main";
+    "https://ultimaotserv.online/downloads/Penultima-Client-Feed.zip";
 
 /// Manifesto principal do cliente
 pub const CLIENT_PACKAGE_MANIFEST_URL: &str =
-    "https://raw.githubusercontent.com/Vavaasz/penultima-client/main/package.json";
+    "https://ultimaotserv.online/downloads/client-feed/package.json";
 
 /// Arquivo com a versão publicada do cliente
 pub const CLIENT_PACKAGE_VERSION_URL: &str =
-    "https://raw.githubusercontent.com/Vavaasz/penultima-client/main/package.json.version";
+    "https://ultimaotserv.online/downloads/client-feed/package.json.version";
 
 /// Manifesto de assets do cliente
 pub const CLIENT_ASSET_MANIFEST_URL: &str =
-    "https://raw.githubusercontent.com/Vavaasz/penultima-client/main/assets.json";
+    "https://ultimaotserv.online/downloads/client-feed/assets.json";
 
 /// Hash do manifesto de assets
 pub const CLIENT_ASSET_MANIFEST_HASH_URL: &str =
-    "https://raw.githubusercontent.com/Vavaasz/penultima-client/main/assets.json.sha256";
+    "https://ultimaotserv.online/downloads/client-feed/assets.json.sha256";
 
 /// URLs predefinidas para servidores
 pub const PREDEFINED_SERVERS: [&str; 3] = [

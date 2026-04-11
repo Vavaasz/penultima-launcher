@@ -5,6 +5,7 @@ Windows launcher for Penultima.
 What it does:
 
 - downloads and updates the public client feed from `Vavaasz/penultima-client`
+- downloads and updates the website-hosted client feed from `ultimaotserv.online/downloads/client-feed`
 - only updates managed client folders: `assets`, `bin`, and `sounds`
 - keeps launcher state in AppData instead of writing manifests into the client root
 - starts the client with production defaults for `ultimaotserv.online`
@@ -26,11 +27,16 @@ Local publish helpers:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\publish-client-feed.ps1
 powershell -ExecutionPolicy Bypass -File .\publish-launcher-release.ps1
+powershell -ExecutionPolicy Bypass -File .\deploy-website-downloads.ps1
 ```
 
 The first command rebuilds the public client feed from `D:\Server\Cliente-15.23-Prod`.
 
 The second command rebuilds the launcher release and writes `D:\Server\_publish\Penultima-Launcher.zip`.
+
+The third command republishes the launcher zip, client feed, and portable client zip directly into `D:\Server\UniServerZ\www\downloads` from your local workstation.
+
+VPS automation for website client assets now lives in `D:\Server\Cliente-15.23-Prod`, because `D:\Server\Launcher` is not deployed on the VPS.
 
 Release policy:
 
