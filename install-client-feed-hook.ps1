@@ -2,8 +2,8 @@ $ErrorActionPreference = "Stop"
 
 $sourceRoot = "D:\\Server\\Cliente-15.23-Prod"
 $hookPath = Join-Path $sourceRoot ".git\\hooks\\post-commit"
-$publishScript = "D:/Server/Launcher/publish-client-feed.ps1"
-$logPath = "D:/Server/Cliente-15.23-Prod/.git/penultima-public-feed.log"
+$publishScript = "D:/Server/Launcher/publish-client-artifacts.ps1"
+$logPath = "D:/Server/Cliente-15.23-Prod/.git/penultima-client-publish.log"
 
 $hook = @'
 #!/bin/sh
@@ -14,9 +14,9 @@ repo_root="$(git rev-parse --show-toplevel)"
 commit_short="$(git rev-parse --short HEAD)"
 log_file="__LOG_PATH__"
 
-printf "\n[%s] Publishing public client feed from %s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$commit_short" >> "$log_file"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "__PUBLISH_SCRIPT__" -CommitAndPush -SourceCommit "$commit_short" >> "$log_file" 2>&1 || {
-  printf "Public client feed publish failed for %s\n" "$commit_short" >> "$log_file"
+printf "\n[%s] Publishing client artifacts from %s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$commit_short" >> "$log_file"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "__PUBLISH_SCRIPT__" -SourceRoot "$repo_root" -SourceCommit "$commit_short" >> "$log_file" 2>&1 || {
+  printf "Client artifact publish failed for %s\n" "$commit_short" >> "$log_file"
 }
 '@
 

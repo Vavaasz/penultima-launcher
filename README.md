@@ -25,16 +25,21 @@ Public client feed:
 Local publish helpers:
 
 ```powershell
+powershell -ExecutionPolicy Bypass -File .\publish-client-artifacts.ps1
 powershell -ExecutionPolicy Bypass -File .\publish-client-feed.ps1
 powershell -ExecutionPolicy Bypass -File .\publish-launcher-release.ps1
 powershell -ExecutionPolicy Bypass -File .\deploy-website-downloads.ps1
 ```
 
-The first command rebuilds the public client feed from `D:\Server\Cliente-15.23-Prod`.
+The first command publishes the public client feed and the website `downloads` payload from the same `D:\Server\Cliente-15.23-Prod` commit, so the launcher feed and portable zip stay aligned.
 
-The second command rebuilds the launcher release and writes `D:\Server\_publish\Penultima-Launcher.zip`.
+The second command rebuilds only the public client feed from `D:\Server\Cliente-15.23-Prod`.
 
-The third command republishes the launcher zip, client feed, and portable client zip directly into `D:\Server\UniServerZ\www\downloads` from your local workstation.
+The third command rebuilds the launcher release and writes `D:\Server\_publish\Penultima-Launcher.zip`.
+
+The fourth command republishes the launcher zip, client feed, and portable client zip directly into `D:\Server\UniServerZ\www\downloads` from your local workstation.
+
+`install-client-feed-hook.ps1` now installs a `post-commit` hook in `D:\Server\Cliente-15.23-Prod` that runs `publish-client-artifacts.ps1`, so each client commit republishes the public feed and refreshes the website portable/feed downloads from that same commit.
 
 VPS automation for website client assets now lives in `D:\Server\Cliente-15.23-Prod`, because `D:\Server\Launcher` is not deployed on the VPS.
 
