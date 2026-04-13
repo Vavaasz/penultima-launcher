@@ -41,4 +41,5 @@ VPS automation for website client assets now lives in `D:\Server\Cliente-15.23-P
 Release policy:
 
 - public launcher builds should be Authenticode-signed before publishing
-- `publish-launcher-release.ps1` now refuses unsigned public builds unless `-AllowUnsigned` is used for local-only testing
+- `publish-launcher-release.ps1` accepts either `PENULTIMA_SIGN_CERT_THUMBPRINT` or `PENULTIMA_SIGN_CERT_PATH`/`PENULTIMA_SIGN_CERT_PASSWORD`, and refuses unsigned public builds unless `-AllowUnsigned` is used for local-only testing
+- `deploy-website-downloads.ps1` accepts the same signing inputs and refuses unsigned public launcher deploys unless `-AllowUnsignedLauncher` is passed for local-only testing

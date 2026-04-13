@@ -3,6 +3,9 @@ param(
   [string]$ClientRoot = "D:\Server\Cliente-15.23-Prod",
   [string]$WebsiteRoot = "D:\Server\UniServerZ\www",
   [switch]$AllowUnsignedLauncher,
+  [string]$CertificateThumbprint = $env:PENULTIMA_SIGN_CERT_THUMBPRINT,
+  [string]$CertificatePath = $env:PENULTIMA_SIGN_CERT_PATH,
+  [string]$CertificatePassword = $env:PENULTIMA_SIGN_CERT_PASSWORD,
   [switch]$SkipClient,
   [switch]$SkipLauncher
 )
@@ -88,10 +91,23 @@ function Publish-FeedBootstrapZip(
   New-ZipFromDirectory -SourceDirectory $FeedRoot -ZipPath $BootstrapZipPath
 }
 
-function Should-AllowUnsignedLauncher {
-  param([switch]$AllowUnsigned)
+function Get-SafeSignatureStatus {
+  param([string]$Path)
 
-  return $AllowUnsigned -or [string]::IsNullOrWhiteSpace($env:PENULTIMA_SIGN_CERT_THUMBPRINT)
+  try {
+    return (Get-AuthenticodeSignature $Path).Status.ToString()
+  } catch {
+    return "Unreadable"
+  }
+}
+
+function Test-HasCertificateConfig {
+  param(
+    [string]$Thumbprint,
+    [string]$Path
+  )
+
+  return (-not [string]::IsNullOrWhiteSpace($Thumbprint)) -or (-not [string]::IsNullOrWhiteSpace($Path))
 }
 
 if (-not (Test-Path $LauncherRoot)) {
@@ -128,21 +144,39 @@ if (-not $SkipClient) {
   Publish-PortableClient -SourceRoot $ClientRoot -PortableZipPath $portableZipPath
 }
 
-$allowUnsignedLauncherBuild = Should-AllowUnsignedLauncher -AllowUnsigned:$AllowUnsignedLauncher
 if (-not $SkipLauncher) {
-  if ($allowUnsignedLauncherBuild) {
+  if ($AllowUnsignedLauncher) {
     Write-Warning "Deploying launcher without Authenticode signing. Configure PENULTIMA_SIGN_CERT_THUMBPRINT on the VPS to publish a signed launcher."
+  } elseif (-not (Test-HasCertificateConfig -Thumbprint $CertificateThumbprint -Path $CertificatePath)) {
+    throw "Signing is not configured. Set PENULTIMA_SIGN_CERT_THUMBPRINT or PENULTIMA_SIGN_CERT_PATH, or pass -AllowUnsignedLauncher only for local testing."
   }
 
   $launcherPublishArgs = @{
     ReleaseDir = $launcherReleaseDir
     ZipPath = $launcherZipPath
   }
-  if ($allowUnsignedLauncherBuild) {
+  if (-not [string]::IsNullOrWhiteSpace($CertificateThumbprint)) {
+    $launcherPublishArgs.CertificateThumbprint = $CertificateThumbprint
+  }
+  if (-not [string]::IsNullOrWhiteSpace($CertificatePath)) {
+    $launcherPublishArgs.CertificatePath = $CertificatePath
+  }
+  if (-not [string]::IsNullOrWhiteSpace($CertificatePassword)) {
+    $launcherPublishArgs.CertificatePassword = $CertificatePassword
+  }
+  if ($AllowUnsignedLauncher) {
     $launcherPublishArgs.AllowUnsigned = $true
   }
 
   & $publishLauncherScript @launcherPublishArgs
+}
+
+$launcherExePath = Join-Path $launcherReleaseDir "penultima-launcher.exe"
+$launcherSignatureStatus = $null
+$launcherSigned = $null
+if (Test-Path $launcherExePath) {
+  $launcherSignatureStatus = Get-SafeSignatureStatus -Path $launcherExePath
+  $launcherSigned = $launcherSignatureStatus -eq "Valid"
 }
 
 $feedVersionPath = Join-Path $feedRoot "package.json.version"
@@ -158,7 +192,8 @@ if (Test-Path $launcherZipPath) {
     zip = "downloads/Penultima-Launcher.zip"
     sha256 = (Get-FileHash $launcherZipPath -Algorithm SHA256).Hash
     size = (Get-Item $launcherZipPath).Length
-    signed = -not $allowUnsignedLauncherBuild
+    signed = $launcherSigned
+    signature_status = $launcherSignatureStatus
   }
 }
 

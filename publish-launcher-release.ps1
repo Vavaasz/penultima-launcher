@@ -1,6 +1,8 @@
 param(
   [switch]$AllowUnsigned,
   [string]$CertificateThumbprint = $env:PENULTIMA_SIGN_CERT_THUMBPRINT,
+  [string]$CertificatePath = $env:PENULTIMA_SIGN_CERT_PATH,
+  [string]$CertificatePassword = $env:PENULTIMA_SIGN_CERT_PASSWORD,
   [string]$TimestampUrl = $(if ($env:PENULTIMA_SIGN_TIMESTAMP_URL) { $env:PENULTIMA_SIGN_TIMESTAMP_URL } else { "http://timestamp.digicert.com" }),
   [string]$ReleaseDir = "D:\Server\_publish\penultima-launcher-release",
   [string]$ZipPath = "D:\Server\_publish\Penultima-Launcher.zip"
@@ -36,6 +38,15 @@ function Get-SafeSignatureStatus {
   }
 }
 
+function Test-HasCertificateConfig {
+  param(
+    [string]$Thumbprint,
+    [string]$Path
+  )
+
+  return (-not [string]::IsNullOrWhiteSpace($Thumbprint)) -or (-not [string]::IsNullOrWhiteSpace($Path))
+}
+
 $cargo = Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe"
 if (-not (Test-Path $cargo)) {
   throw "Cargo was not found at $cargo"
@@ -51,11 +62,39 @@ if (-not (Test-Path $exeSource)) {
   throw "Launcher executable was not produced at $exeSource"
 }
 
-if (-not $AllowUnsigned -and [string]::IsNullOrWhiteSpace($CertificateThumbprint)) {
-  throw "Refusing to publish an unsigned launcher. Set PENULTIMA_SIGN_CERT_THUMBPRINT or pass -AllowUnsigned for a local-only build."
+if (-not $AllowUnsigned -and -not (Test-HasCertificateConfig -Thumbprint $CertificateThumbprint -Path $CertificatePath)) {
+  throw "Refusing to publish an unsigned launcher. Set PENULTIMA_SIGN_CERT_THUMBPRINT or PENULTIMA_SIGN_CERT_PATH, or pass -AllowUnsigned for a local-only build."
 }
 
-if (-not [string]::IsNullOrWhiteSpace($CertificateThumbprint)) {
+if (-not [string]::IsNullOrWhiteSpace($CertificatePath)) {
+  if (-not (Test-Path $CertificatePath)) {
+    throw "Certificate file not found: $CertificatePath"
+  }
+
+  $signTool = Resolve-SignTool
+  if (-not $signTool) {
+    throw "signtool.exe was not found. Install the Windows SDK or add signtool.exe to PATH."
+  }
+
+  $signArgs = @(
+    "sign",
+    "/f", $CertificatePath,
+    "/fd", "SHA256",
+    "/td", "SHA256",
+    "/tr", $TimestampUrl,
+    "/v"
+  )
+  if (-not [string]::IsNullOrWhiteSpace($CertificatePassword)) {
+    $signArgs += @("/p", $CertificatePassword)
+  }
+  $signArgs += $exeSource
+
+  & $signTool @signArgs
+  if ($LASTEXITCODE -ne 0) {
+    throw "signtool.exe failed with exit code $LASTEXITCODE"
+  }
+}
+elseif (-not [string]::IsNullOrWhiteSpace($CertificateThumbprint)) {
   $signTool = Resolve-SignTool
   if (-not $signTool) {
     throw "signtool.exe was not found. Install the Windows SDK or add signtool.exe to PATH."
