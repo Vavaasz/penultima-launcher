@@ -12,85 +12,6 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-Add-Type -AssemblyName System.IO.Compression
-Add-Type -AssemblyName System.IO.Compression.FileSystem
-
-function New-EmptyDirectory([string]$Path) {
-  if (Test-Path $Path) {
-    Remove-Item -LiteralPath $Path -Recurse -Force
-  }
-  New-Item -ItemType Directory -Path $Path | Out-Null
-}
-
-function New-StagingRoot {
-  $path = Join-Path ([System.IO.Path]::GetTempPath()) ("penultima-downloads-" + [guid]::NewGuid().ToString("N"))
-  New-Item -ItemType Directory -Path $path | Out-Null
-  return $path
-}
-
-function New-ZipFromDirectory([string]$SourceDirectory, [string]$ZipPath) {
-  if (Test-Path $ZipPath) {
-    Remove-Item -LiteralPath $ZipPath -Force
-  }
-
-  $zipParent = Split-Path -Parent $ZipPath
-  if ($zipParent) {
-    New-Item -ItemType Directory -Path $zipParent -Force | Out-Null
-  }
-
-  [System.IO.Compression.ZipFile]::CreateFromDirectory(
-    $SourceDirectory,
-    $ZipPath,
-    [System.IO.Compression.CompressionLevel]::Optimal,
-    $false
-  )
-}
-
-function Copy-Tree([string]$SourcePath, [string]$DestinationPath) {
-  New-Item -ItemType Directory -Path (Split-Path -Parent $DestinationPath) -Force | Out-Null
-  Copy-Item -LiteralPath $SourcePath -Destination $DestinationPath -Recurse -Force
-}
-
-function Publish-PortableClient(
-  [string]$SourceRoot,
-  [string]$PortableZipPath
-) {
-  $skipDirs = @(".git", "cache", "characterdata", "crashdump", "log", "minimap", "screenshots", "storeimages")
-  $stagingRoot = New-StagingRoot
-  $portableRoot = Join-Path $stagingRoot "Penultima-Client-Portable"
-
-  try {
-    New-Item -ItemType Directory -Path $portableRoot | Out-Null
-
-    Get-ChildItem -LiteralPath $SourceRoot -Force | ForEach-Object {
-      if ($skipDirs -contains $_.Name) {
-        return
-      }
-
-      $targetPath = Join-Path $portableRoot $_.Name
-      if ($_.PSIsContainer) {
-        Copy-Item -LiteralPath $_.FullName -Destination $targetPath -Recurse -Force
-      } else {
-        Copy-Item -LiteralPath $_.FullName -Destination $targetPath -Force
-      }
-    }
-
-    New-ZipFromDirectory -SourceDirectory $portableRoot -ZipPath $PortableZipPath
-  }
-  finally {
-    if (Test-Path $stagingRoot) {
-      Remove-Item -LiteralPath $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue
-    }
-  }
-}
-
-function Publish-FeedBootstrapZip(
-  [string]$FeedRoot,
-  [string]$BootstrapZipPath
-) {
-  New-ZipFromDirectory -SourceDirectory $FeedRoot -ZipPath $BootstrapZipPath
-}
-
 function Get-SafeSignatureStatus {
   param([string]$Path)
 
@@ -128,20 +49,22 @@ $bootstrapZipPath = Join-Path $downloadsRoot "Penultima-Client-Feed.zip"
 $portableZipPath = Join-Path $downloadsRoot "Penultima-Client-Portable.zip"
 $launcherZipPath = Join-Path $downloadsRoot "Penultima-Launcher.zip"
 $launcherReleaseDir = Join-Path (Join-Path (Split-Path -Parent $LauncherRoot) "_publish") "penultima-launcher-release"
-$publishClientFeedScript = Join-Path $LauncherRoot "publish-client-feed.ps1"
 $publishLauncherScript = Join-Path $LauncherRoot "publish-launcher-release.ps1"
+$publishWebsiteClientAssetsScript = Join-Path $ClientRoot "sounds\publish-website-client-assets.ps1"
 $metadataPath = Join-Path $downloadsRoot "penultima-downloads.json"
 
 New-Item -ItemType Directory -Path $downloadsRoot -Force | Out-Null
 
 if (-not $SkipClient) {
-  & $publishClientFeedScript `
-    -SourceRoot $ClientRoot `
-    -OutputRoot $feedRoot `
-    -Version auto
+  if (-not (Test-Path -LiteralPath $publishWebsiteClientAssetsScript)) {
+    throw "Canonical client asset publisher not found: $publishWebsiteClientAssetsScript"
+  }
 
-  Publish-FeedBootstrapZip -FeedRoot $feedRoot -BootstrapZipPath $bootstrapZipPath
-  Publish-PortableClient -SourceRoot $ClientRoot -PortableZipPath $portableZipPath
+  & $publishWebsiteClientAssetsScript `
+    -ClientRoot $ClientRoot `
+    -WebsiteRoot $WebsiteRoot `
+    -Version auto `
+    -RebuildMetadata
 }
 
 if (-not $SkipLauncher) {

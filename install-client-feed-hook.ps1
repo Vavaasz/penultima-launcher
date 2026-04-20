@@ -18,6 +18,8 @@ log_file="__LOG_PATH__"
 printf "\n[%s] Publishing website client downloads from %s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$commit_short" >> "$log_file"
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "__PUBLISH_SCRIPT__" -ClientRoot "$repo_root" -WebsiteRoot "__WEBSITE_ROOT__" -Version auto -RebuildMetadata >> "$log_file" 2>&1 || {
   printf "Client artifact publish failed for %s\n" "$commit_short" >> "$log_file"
+  printf >&2 "Client artifact publish failed for %s. See %s\n" "$commit_short" "$log_file"
+  exit 1
 }
 '@
 
