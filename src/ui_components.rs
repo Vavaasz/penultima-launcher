@@ -393,12 +393,13 @@ impl GameLauncher {
         ui.add_space(available_height - button_height - 1.0);
 
         let (has_main, additional_count) = self.game_client.sync_client_state();
+        let has_clients = has_main || additional_count > 0;
         if !self.is_processing {
             ui.horizontal_centered(|ui| {
                 if ui
                     .add_sized(
                         [150.0, 30.0],
-                            egui::Button::new(
+                        egui::Button::new(
                             egui::RichText::new("Minimizar launcher")
                                 .size(14.0)
                                 .color(egui::Color32::from_rgb(220, 220, 220)),
@@ -416,6 +417,68 @@ impl GameLauncher {
                 {
                     self.minimize_to_tray(ctx);
                 }
+
+                let client_button_text = if self.clients_hidden_to_tray {
+                    "Restaurar clientes"
+                } else {
+                    "Minimizar clientes"
+                };
+
+                if ui
+                    .add_sized(
+                        [150.0, 30.0],
+                        egui::Button::new(
+                            egui::RichText::new(client_button_text)
+                                .size(14.0)
+                                .color(egui::Color32::from_rgb(220, 220, 220)),
+                        )
+                        .fill(egui::Color32::from_rgba_unmultiplied(
+                            SURFACE_RGB.0,
+                            SURFACE_RGB.1,
+                            SURFACE_RGB.2,
+                            220,
+                        ))
+                        .corner_radius(12.0)
+                        .stroke(egui::Stroke::NONE),
+                    )
+                    .clicked()
+                {
+                    if self.clients_hidden_to_tray {
+                        self.restore_clients_from_tray(ctx);
+                    } else {
+                        self.minimize_clients_to_tray(ctx);
+                    }
+                }
+
+                if ui
+                    .add_sized(
+                        [130.0, 30.0],
+                        egui::Button::new(
+                            egui::RichText::new("Force Update")
+                                .size(14.0)
+                                .color(egui::Color32::from_rgb(220, 220, 220)),
+                        )
+                        .fill(egui::Color32::from_rgba_unmultiplied(
+                            SURFACE_RGB.0,
+                            SURFACE_RGB.1,
+                            SURFACE_RGB.2,
+                            220,
+                        ))
+                        .corner_radius(12.0)
+                        .stroke(egui::Stroke::NONE),
+                    )
+                    .clicked()
+                {
+                    if has_clients {
+                        self.status =
+                            "Feche todos os clientes antes de usar Force Update".to_string();
+                        self.temp_message_time = Some(std::time::Instant::now());
+                        self.is_alert_message = true;
+                        ctx.request_repaint();
+                    } else {
+                        self.show_force_update_modal = true;
+                    }
+                }
             });
         }
 
@@ -423,23 +486,6 @@ impl GameLauncher {
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::BOTTOM), |ui| {
                     ui.add_space(10.0);
-
-                    if ui
-                        .add_sized(
-                            [130.0, 30.0],
-                            egui::Button::new(
-                                egui::RichText::new("Forcar Atualizacao").size(14.0).color(
-                                    egui::Color32::from_rgba_unmultiplied(200, 200, 200, 180),
-                                ),
-                            )
-                            .fill(egui::Color32::from_rgba_unmultiplied(40, 40, 40, 180))
-                            .corner_radius(4.0)
-                            .stroke(egui::Stroke::NONE),
-                        )
-                        .clicked()
-                    {
-                        self.show_force_update_modal = true;
-                    }
                 });
 
                 ui.add_space(ui.available_width() * 0.22);
@@ -576,7 +622,6 @@ impl GameLauncher {
                                 );
                             }
                         });
-
                     });
                 });
         }

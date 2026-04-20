@@ -248,7 +248,7 @@ impl UpdateManager {
         }
 
         if use_archive_install {
-            self.install_from_archive(&download_client, &message_sender)
+            self.install_from_archive(&download_client, &message_sender, &remote.package_manifest)
                 .await?;
         } else {
             for (index, file) in files_to_update.iter().enumerate() {
@@ -324,6 +324,14 @@ impl UpdateManager {
             .unwrap_or_default();
 
         for file in &manifest.files {
+            if force && file.bootstrap_only && file.target_path(&self.game_path).exists() {
+                info!(
+                    "Preservando arquivo bootstrap existente durante atualizacao forcada: {}",
+                    file.localfile
+                );
+                continue;
+            }
+
             if force || self.file_needs_update_fast(file, previous_files.get(&file.localfile))? {
                 changed_files.push(file.clone());
             }
@@ -531,6 +539,7 @@ impl UpdateManager {
         &self,
         http_client: &reqwest::Client,
         message_sender: &mpsc::UnboundedSender<LauncherMessage>,
+        manifest: &PackageManifest,
     ) -> Result<()> {
         fs::create_dir_all(&self.state_path)?;
         fs::create_dir_all(&self.game_path)?;
@@ -564,6 +573,7 @@ impl UpdateManager {
             &self.state_path,
             message_sender,
             !self.game_path.join("bin").join("client.exe").exists(),
+            &archive_preserved_bootstrap_paths(manifest, &self.game_path),
         );
 
         if archive_path.exists() {
@@ -789,8 +799,10 @@ fn extract_client_archive(
     state_path: &Path,
     message_sender: &mpsc::UnboundedSender<LauncherMessage>,
     prefer_native_extract: bool,
+    preserved_paths: &HashSet<String>,
 ) -> Result<()> {
-    if prefer_native_extract
+    if preserved_paths.is_empty()
+        && prefer_native_extract
         && try_extract_client_archive_natively(archive_path, game_path, message_sender)?
     {
         return Ok(());
@@ -815,6 +827,10 @@ fn extract_client_archive(
         let Some(relative_path) = archive_relative_path(entry.name()) else {
             continue;
         };
+        if preserved_paths.contains(&archive_path_key(&relative_path)) {
+            continue;
+        }
+
         let Some(destination) = archive_destination_for(&relative_path, game_path, state_path)
         else {
             continue;
@@ -918,6 +934,18 @@ fn extract_client_archive(
     Ok(())
 }
 
+fn archive_preserved_bootstrap_paths(
+    manifest: &PackageManifest,
+    game_path: &Path,
+) -> HashSet<String> {
+    manifest
+        .files
+        .iter()
+        .filter(|file| file.bootstrap_only && file.target_path(game_path).exists())
+        .map(|file| normalize_manifest_path(&file.localfile))
+        .collect()
+}
+
 #[cfg(windows)]
 fn try_extract_client_archive_natively(
     archive_path: &Path,
@@ -925,15 +953,16 @@ fn try_extract_client_archive_natively(
     message_sender: &mpsc::UnboundedSender<LauncherMessage>,
 ) -> Result<bool> {
     if !archive_is_native_extract_safe(archive_path)? {
-        info!("Pacote bootstrap nao passou na validacao para extracao nativa; usando fallback Rust");
+        info!(
+            "Pacote bootstrap nao passou na validacao para extracao nativa; usando fallback Rust"
+        );
         return Ok(false);
     }
 
     send_message(
         message_sender,
         LauncherMessage::SetStatus(
-            "Extraindo pacote completo do cliente com extrator nativo do Windows..."
-                .to_string(),
+            "Extraindo pacote completo do cliente com extrator nativo do Windows...".to_string(),
         ),
     )?;
 
@@ -1002,7 +1031,10 @@ fn archive_is_native_extract_safe(archive_path: &Path) -> Result<bool> {
 
 fn archive_relative_path(entry_name: &str) -> Option<PathBuf> {
     let normalized = entry_name.replace('\\', "/");
-    let parts: Vec<&str> = normalized.split('/').filter(|part| !part.is_empty()).collect();
+    let parts: Vec<&str> = normalized
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
     if parts.is_empty() {
         return None;
     }
@@ -1042,6 +1074,14 @@ fn archive_relative_path(entry_name: &str) -> Option<PathBuf> {
     } else {
         Some(relative_path)
     }
+}
+
+fn archive_path_key(relative_path: &Path) -> String {
+    normalize_manifest_path(&relative_path.to_string_lossy())
+}
+
+fn normalize_manifest_path(path: &str) -> String {
+    path.replace('\\', "/").to_ascii_lowercase()
 }
 
 fn archive_destination_for(
@@ -1302,9 +1342,9 @@ mod tests {
 
     #[test]
     fn native_extract_validation_accepts_conf_files() {
-        assert!(archive_relative_path_is_extractable_at_game_root(Path::new(
-            "conf/config.ini"
-        )));
+        assert!(archive_relative_path_is_extractable_at_game_root(
+            Path::new("conf/config.ini")
+        ));
     }
 
     #[test]

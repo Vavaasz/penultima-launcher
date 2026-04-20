@@ -2,7 +2,8 @@ $ErrorActionPreference = "Stop"
 
 $sourceRoot = "D:\\Server\\Cliente-15.23-Prod"
 $hookPath = Join-Path $sourceRoot ".git\\hooks\\post-commit"
-$publishScript = "D:/Server/Launcher/publish-client-artifacts.ps1"
+$publishScript = "D:/Server/Cliente-15.23-Prod/sounds/publish-website-client-assets.ps1"
+$websiteRoot = "D:/Server/UniServerZ/www"
 $logPath = "D:/Server/Cliente-15.23-Prod/.git/penultima-client-publish.log"
 
 $hook = @'
@@ -14,14 +15,15 @@ repo_root="$(git rev-parse --show-toplevel)"
 commit_short="$(git rev-parse --short HEAD)"
 log_file="__LOG_PATH__"
 
-printf "\n[%s] Publishing client artifacts from %s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$commit_short" >> "$log_file"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "__PUBLISH_SCRIPT__" -SourceRoot "$repo_root" -SourceCommit "$commit_short" >> "$log_file" 2>&1 || {
+printf "\n[%s] Publishing website client downloads from %s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$commit_short" >> "$log_file"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "__PUBLISH_SCRIPT__" -ClientRoot "$repo_root" -WebsiteRoot "__WEBSITE_ROOT__" -Version auto -RebuildMetadata >> "$log_file" 2>&1 || {
   printf "Client artifact publish failed for %s\n" "$commit_short" >> "$log_file"
 }
 '@
 
 $hook = $hook.Replace("__LOG_PATH__", $logPath.Replace("\", "/"))
 $hook = $hook.Replace("__PUBLISH_SCRIPT__", $publishScript)
+$hook = $hook.Replace("__WEBSITE_ROOT__", $websiteRoot)
 
 Set-Content -Path $hookPath -Value $hook -Encoding Ascii -NoNewline
 Write-Host "Installed post-commit publish hook at $hookPath"

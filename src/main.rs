@@ -55,7 +55,7 @@ struct GameLauncher {
     window_state: Arc<Mutex<WindowState>>,
     needs_repaint: Arc<AtomicBool>,
     initialized: bool,
-    auto_hide: bool, // Flag para controlar o auto-hide do launcher
+    auto_hide: bool,                    // Flag para controlar o auto-hide do launcher
     temp_message_time: Option<Instant>, // Momento em que uma mensagem temporária foi definida
     is_alert_message: bool,             // Flag para mensagens de alerta que devem ser destacadas
     is_closing_attempted: bool, // Nova flag para indicar que o usuário tentou fechar a janela
@@ -71,6 +71,7 @@ struct GameLauncher {
     server_ping: Option<u32>,      // Nova variável para armazenar o ping do servidor
     last_ping_check: Option<Instant>, // Momento da última verificação de ping
     was_hidden: bool, // Controla transição de visibilidade para otimizar CPU quando minimizado
+    clients_hidden_to_tray: bool,
     tray_manager: Option<TrayManager>,
 }
 
@@ -132,6 +133,7 @@ impl Default for GameLauncher {
             server_ping: None,     // Inicializar ping como None
             last_ping_check: None, // Inicializar última verificação como None
             was_hidden: false,
+            clients_hidden_to_tray: false,
             tray_manager: None,
         };
 
@@ -206,7 +208,82 @@ impl GameLauncher {
         for action in actions {
             match action {
                 TrayAction::ShowLauncher => self.restore_launcher_from_tray(ctx),
+                TrayAction::RestoreClients => self.restore_clients_from_tray(ctx),
+                TrayAction::MinimizeClients => self.minimize_clients_to_tray(ctx),
                 TrayAction::QuitLauncher => std::process::exit(0),
+            }
+        }
+    }
+
+    fn minimize_clients_to_tray(&mut self, ctx: &egui::Context) {
+        let hidden_count = self.game_client.minimize_clients_to_tray();
+
+        if hidden_count > 0 {
+            self.clients_hidden_to_tray = true;
+            if let Some(tray_manager) = self.tray_manager_mut() {
+                tray_manager.show_clients_icon();
+            }
+            self.status = if hidden_count == 1 {
+                "Cliente enviado para a system tray".to_string()
+            } else {
+                format!("{} clientes enviados para a system tray", hidden_count)
+            };
+        } else if self.game_client.has_tracked_clients() {
+            self.clients_hidden_to_tray = true;
+            if let Some(tray_manager) = self.tray_manager_mut() {
+                tray_manager.show_clients_icon();
+            }
+            self.status = "Clientes ja estao na system tray".to_string();
+        } else {
+            self.clients_hidden_to_tray = false;
+            if let Some(tray_manager) = self.tray_manager_mut() {
+                tray_manager.hide_clients_icon();
+            }
+            self.status = "Nenhum cliente aberto pelo launcher".to_string();
+        }
+
+        self.temp_message_time = Some(Instant::now());
+        self.is_alert_message = false;
+        ctx.request_repaint();
+    }
+
+    fn restore_clients_from_tray(&mut self, ctx: &egui::Context) {
+        let restored_count = self.game_client.restore_clients_from_tray();
+
+        if restored_count > 0 {
+            self.clients_hidden_to_tray = false;
+            if let Some(tray_manager) = self.tray_manager_mut() {
+                tray_manager.hide_clients_icon();
+            }
+            self.status = if restored_count == 1 {
+                "Cliente restaurado".to_string()
+            } else {
+                format!("{} clientes restaurados", restored_count)
+            };
+        } else if self.game_client.has_tracked_clients() {
+            self.clients_hidden_to_tray = true;
+            if let Some(tray_manager) = self.tray_manager_mut() {
+                tray_manager.show_clients_icon();
+            }
+            self.status = "Nenhuma janela de cliente encontrada".to_string();
+        } else {
+            self.clients_hidden_to_tray = false;
+            if let Some(tray_manager) = self.tray_manager_mut() {
+                tray_manager.hide_clients_icon();
+            }
+            self.status = "Nenhum cliente aberto pelo launcher".to_string();
+        }
+
+        self.temp_message_time = Some(Instant::now());
+        self.is_alert_message = false;
+        ctx.request_repaint();
+    }
+
+    fn sync_clients_tray_state(&mut self) {
+        if self.clients_hidden_to_tray && !self.game_client.has_tracked_clients() {
+            self.clients_hidden_to_tray = false;
+            if let Some(tray_manager) = self.tray_manager_mut() {
+                tray_manager.hide_clients_icon();
             }
         }
     }
@@ -425,11 +502,16 @@ impl GameLauncher {
 
     fn terminate_all_processes(&mut self) {
         self.game_client.terminate_all_processes();
+        self.clients_hidden_to_tray = false;
+        if let Some(tray_manager) = self.tray_manager_mut() {
+            tray_manager.hide_clients_icon();
+        }
     }
 
     fn custom_update(&mut self, ctx: &egui::Context) {
         // === Fast path: quando a janela está escondida no tray, fazer apenas trabalho essencial ===
         self.handle_tray_events(ctx);
+        self.sync_clients_tray_state();
 
         let (is_visible, recently_shown) = {
             let state = self.window_state.lock().unwrap();
@@ -499,6 +581,7 @@ impl GameLauncher {
 
             // 3. Limpar clientes adicionais que terminaram
             self.game_client.update_additional_clients();
+            self.sync_clients_tray_state();
 
             // 4. Verificar ping do servidor (async, leve)
             self.check_server_ping();
@@ -728,6 +811,7 @@ impl GameLauncher {
 
         // Atualiza clients que terminaram
         self.game_client.update_additional_clients();
+        self.sync_clients_tray_state();
 
         // Atualizar status com base nos clientes ativos e o cliente principal
         let is_game_running = self.is_game_running();
@@ -877,103 +961,136 @@ impl GameLauncher {
 
         // Renderizar o modal de confirmação para Forçar Atualização
         if self.show_force_update_modal {
-            egui::Window::new("Forçar Atualização")
+            egui::Window::new("Force Update")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .fixed_size([320.0, 140.0])
-                .frame(egui::Frame::window(&ctx.style())
-                    .fill(egui::Color32::from_rgba_unmultiplied(20, 20, 20, 250)))
+                .frame(
+                    egui::Frame::window(&ctx.style())
+                        .fill(egui::Color32::from_rgba_unmultiplied(20, 20, 20, 250)),
+                )
                 .show(ctx, |ui| {
                     ui.vertical_centered(|ui| {
                         ui.add_space(5.0);
                         ui.label(
-                            egui::RichText::new("Tem certeza que deseja forçar a atualização do cliente?")
+                            egui::RichText::new("Baixar novamente os arquivos do cliente?")
                                 .size(13.0)
-                                .color(egui::Color32::from_rgb(160, 160, 160))
+                                .color(egui::Color32::from_rgb(160, 160, 160)),
                         );
 
                         ui.label(
-                            egui::RichText::new("Isso irá baixar a versão mais recente, mesmo que você já tenha a versão atual.")
-                                .size(13.0)
-                                .color(egui::Color32::from_rgb(140, 140, 140))
+                            egui::RichText::new(
+                                "O clientoptions.json existente sera mantido intacto.",
+                            )
+                            .size(13.0)
+                            .color(egui::Color32::from_rgb(140, 140, 140)),
                         );
 
                         ui.add_space(15.0);
 
                         ui.horizontal(|ui| {
                             // Botão Cancelar à esquerda
-                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                if ui.add_sized(
-                                    [90.0, 28.0],
-                                    egui::Button::new(
-                                        egui::RichText::new("Cancelar")
-                                            .size(13.0)
-                                            .color(egui::Color32::from_rgb(200, 200, 200))
-                                    )
-                                        .fill(egui::Color32::from_rgba_unmultiplied(45, 45, 45, 255))
-                                        .corner_radius(2.0)
-                                        .stroke(egui::Stroke::NONE),
-                                ).clicked() {
-                                    self.show_force_update_modal = false;
-                                }
-                            });
+                            ui.with_layout(
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .add_sized(
+                                            [90.0, 28.0],
+                                            egui::Button::new(
+                                                egui::RichText::new("Cancelar")
+                                                    .size(13.0)
+                                                    .color(egui::Color32::from_rgb(200, 200, 200)),
+                                            )
+                                            .fill(egui::Color32::from_rgba_unmultiplied(
+                                                45, 45, 45, 255,
+                                            ))
+                                            .corner_radius(2.0)
+                                            .stroke(egui::Stroke::NONE),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.show_force_update_modal = false;
+                                    }
+                                },
+                            );
 
                             // Espaço flexível entre os botões
-                            ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
-                                ui.allocate_space(ui.available_size());
-                            });
+                            ui.with_layout(
+                                egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                                |ui| {
+                                    ui.allocate_space(ui.available_size());
+                                },
+                            );
 
                             // Botão Confirmar à direita
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.add_sized(
-                                    [90.0, 28.0],
-                                    egui::Button::new(
-                                        egui::RichText::new("Confirmar")
-                                            .size(13.0)
-                                            .color(egui::Color32::BLACK)
-                                    )
-                                        .fill(egui::Color32::from_rgb(76, 175, 80))
-                                        .corner_radius(2.0)
-                                        .stroke(egui::Stroke::NONE),
-                                ).clicked() {
-                                    self.show_force_update_modal = false;
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .add_sized(
+                                            [90.0, 28.0],
+                                            egui::Button::new(
+                                                egui::RichText::new("Confirmar")
+                                                    .size(13.0)
+                                                    .color(egui::Color32::BLACK),
+                                            )
+                                            .fill(egui::Color32::from_rgb(76, 175, 80))
+                                            .corner_radius(2.0)
+                                            .stroke(egui::Stroke::NONE),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.show_force_update_modal = false;
 
-                                    // Iniciar a atualização forçada
-                                    let (tx, rx) = mpsc::unbounded_channel();
-                                    self.message_receiver = Some(rx);
-                                    self.status = "Iniciando atualização forçada...".to_string();
-                                    self.is_processing = true;
-                                    self.progress = 0.0;
-                                    ctx.request_repaint();
+                                        // Iniciar a atualização forçada
+                                        let (tx, rx) = mpsc::unbounded_channel();
+                                        self.message_receiver = Some(rx);
+                                        self.status = "Iniciando Force Update...".to_string();
+                                        self.is_processing = true;
+                                        self.progress = 0.0;
+                                        ctx.request_repaint();
 
-                                    let download_path = self.download_path.clone();
-                                    let game_path = self.game_path.clone();
-                                    let state_path = self.state_path.clone();
-                                    let disable_auto_start = self.disable_auto_start;
-                                    let update_manager = updates::UpdateManager::new(
-                                        download_path,
-                                        game_path,
-                                        state_path,
-                                    );
+                                        let download_path = self.download_path.clone();
+                                        let game_path = self.game_path.clone();
+                                        let state_path = self.state_path.clone();
+                                        let disable_auto_start = self.disable_auto_start;
+                                        let update_manager = updates::UpdateManager::new(
+                                            download_path,
+                                            game_path,
+                                            state_path,
+                                        );
 
-                                    tokio::spawn(async move {
-                                        match update_manager.force_refresh(tx.clone(), disable_auto_start).await {
-                                            Ok(_) => {
-                                                info!("Atualização forçada concluída com sucesso");
+                                        tokio::spawn(async move {
+                                            match update_manager
+                                                .force_refresh(tx.clone(), disable_auto_start)
+                                                .await
+                                            {
+                                                Ok(_) => {
+                                                    info!(
+                                                        "Atualização forçada concluída com sucesso"
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    info!(
+                                                        "Erro durante atualização forçada: {}",
+                                                        e
+                                                    );
+                                                    let _ = tx.send(LauncherMessage::SetStatus(
+                                                        format!(
+                                                            "Erro na atualização forçada: {}",
+                                                            e
+                                                        ),
+                                                    ));
+                                                    let _ = tx.send(
+                                                        LauncherMessage::SetProcessing(false),
+                                                    );
+                                                }
                                             }
-                                            Err(e) => {
-                                                info!("Erro durante atualização forçada: {}", e);
-                                                let _ = tx.send(LauncherMessage::SetStatus(format!(
-                                                    "Erro na atualização forçada: {}",
-                                                    e
-                                                )));
-                                                let _ = tx.send(LauncherMessage::SetProcessing(false));
-                                            }
-                                        }
-                                    });
-                                }
-                            });
+                                        });
+                                    }
+                                },
+                            );
                         });
                     });
                 });

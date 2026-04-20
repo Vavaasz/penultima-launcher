@@ -1,13 +1,20 @@
 use anyhow::{Context, Result, anyhow};
 use glob::glob;
 use log::info;
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::ptr::null;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use winapi::shared::minwindef::{BOOL, LPARAM, TRUE};
+use winapi::shared::windef::HWND;
 use winapi::um::shellapi::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
+use winapi::um::winuser::{
+    EnumWindows, GetWindowTextLengthW, GetWindowThreadProcessId, IsWindowVisible, SW_HIDE,
+    SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow,
+};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, STILL_ACTIVE, WAIT_TIMEOUT};
 use windows::Win32::System::Threading::{GetExitCodeProcess, GetProcessId, WaitForSingleObject};
 
@@ -87,6 +94,25 @@ impl Drop for ProcessHandle {
             let _ = CloseHandle(self.handle);
         }
     }
+}
+
+struct ClientWindowSearch {
+    pids: HashSet<u32>,
+    windows: Vec<HWND>,
+}
+
+unsafe extern "system" fn enum_client_windows(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let search = unsafe { &mut *(lparam as *mut ClientWindowSearch) };
+    let mut pid = 0u32;
+
+    unsafe {
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if search.pids.contains(&pid) && GetWindowTextLengthW(hwnd) > 0 {
+            search.windows.push(hwnd);
+        }
+    }
+
+    TRUE
 }
 
 pub struct GameClient {
@@ -187,6 +213,74 @@ impl GameClient {
         let has_main = self.is_main_client_running();
         self.update_additional_clients();
         (has_main, self.active_clients.len())
+    }
+
+    pub fn has_tracked_clients(&mut self) -> bool {
+        let (has_main, additional_count) = self.sync_client_state();
+        has_main || additional_count > 0
+    }
+
+    pub fn minimize_clients_to_tray(&mut self) -> usize {
+        self.sync_client_state();
+
+        let mut hidden_count = 0;
+        for hwnd in self.tracked_client_windows() {
+            unsafe {
+                if IsWindowVisible(hwnd) != 0 {
+                    ShowWindow(hwnd, SW_HIDE);
+                    hidden_count += 1;
+                }
+            }
+        }
+
+        hidden_count
+    }
+
+    pub fn restore_clients_from_tray(&mut self) -> usize {
+        self.sync_client_state();
+
+        let mut restored_count = 0;
+        for hwnd in self.tracked_client_windows() {
+            unsafe {
+                ShowWindow(hwnd, SW_RESTORE);
+                ShowWindow(hwnd, SW_SHOW);
+                SetForegroundWindow(hwnd);
+            }
+            restored_count += 1;
+        }
+
+        restored_count
+    }
+
+    fn tracked_client_pids(&self) -> HashSet<u32> {
+        let mut pids = HashSet::new();
+        if let Some(process) = &self.game_process {
+            pids.insert(process.pid);
+        }
+
+        pids.extend(self.active_clients.iter().map(|client| client.pid));
+        pids
+    }
+
+    fn tracked_client_windows(&self) -> Vec<HWND> {
+        let pids = self.tracked_client_pids();
+        if pids.is_empty() {
+            return Vec::new();
+        }
+
+        let mut search = ClientWindowSearch {
+            pids,
+            windows: Vec::new(),
+        };
+
+        unsafe {
+            EnumWindows(
+                Some(enum_client_windows),
+                &mut search as *mut ClientWindowSearch as LPARAM,
+            );
+        }
+
+        search.windows
     }
 }
 

@@ -29,6 +29,8 @@ powershell -ExecutionPolicy Bypass -File .\publish-client-artifacts.ps1
 powershell -ExecutionPolicy Bypass -File .\publish-client-feed.ps1
 powershell -ExecutionPolicy Bypass -File .\publish-launcher-release.ps1
 powershell -ExecutionPolicy Bypass -File .\deploy-website-downloads.ps1
+powershell -ExecutionPolicy Bypass -File .\install-client-feed-hook.ps1
+powershell -ExecutionPolicy Bypass -File .\install-launcher-website-hook.ps1
 ```
 
 The first command publishes the public client feed and the website `downloads` payload from the same `D:\Server\Cliente-15.23-Prod` commit, so the launcher feed and portable zip stay aligned.
@@ -39,7 +41,9 @@ The third command rebuilds the launcher release and writes `D:\Server\_publish\P
 
 The fourth command republishes the launcher zip, client feed, and portable client zip directly into `D:\Server\UniServerZ\www\downloads` from your local workstation.
 
-`install-client-feed-hook.ps1` now installs a `post-commit` hook in `D:\Server\Cliente-15.23-Prod` that runs `publish-client-artifacts.ps1`, so each client commit republishes the public feed and refreshes the website portable/feed downloads from that same commit.
+`install-client-feed-hook.ps1` installs a local `post-commit` hook in `D:\Server\Cliente-15.23-Prod` that runs `sounds\publish-website-client-assets.ps1`, so each client commit refreshes the website `client-feed`, bootstrap feed zip, portable client zip, and metadata from the current local client state.
+
+`install-launcher-website-hook.ps1` installs a local `post-commit` hook in `D:\Server\Launcher` that runs `deploy-website-downloads.ps1 -SkipClient`, so each launcher commit refreshes `D:\Server\UniServerZ\www\downloads\Penultima-Launcher.zip`. If no signing certificate environment is configured, the hook passes `-AllowUnsignedLauncher` for local-only publishing.
 
 VPS automation for website client assets now lives in `D:\Server\Cliente-15.23-Prod`, because `D:\Server\Launcher` is not deployed on the VPS.
 
