@@ -160,6 +160,7 @@ $metadata = [ordered]@{
   client_feed = $clientFeedMetadata
 }
 
-$metadata | ConvertTo-Json -Depth 6 | Set-Content -Path $metadataPath -Encoding UTF8
+$metadataJson = $metadata | ConvertTo-Json -Depth 6
+[System.IO.File]::WriteAllText($metadataPath, $metadataJson, [System.Text.UTF8Encoding]::new($false))
 
 Write-Host "Website downloads updated in $downloadsRoot"

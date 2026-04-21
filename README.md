@@ -6,7 +6,7 @@ What it does:
 
 - downloads and updates the public client feed from `Vavaasz/penultima-client`
 - downloads and updates the website-hosted client feed from `ultimaotserv.online/downloads/client-feed`
-- updates the launcher executable from the website-hosted `Penultima-Launcher.zip`
+- updates the launcher executable from the website-hosted `Penultima-Launcher.zip` on startup, with a manual button as a fallback
 - only updates managed client folders: `assets`, `bin`, and `sounds`
 - keeps launcher state in AppData instead of writing manifests into the client root
 - starts the client with production defaults for `ultimaotserv.online`

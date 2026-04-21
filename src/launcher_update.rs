@@ -52,6 +52,21 @@ impl LauncherUpdateManager {
         &self,
         message_sender: mpsc::UnboundedSender<LauncherMessage>,
     ) -> Result<()> {
+        self.run_update(message_sender, true).await.map(|_| ())
+    }
+
+    pub async fn update_launcher_if_available(
+        &self,
+        message_sender: mpsc::UnboundedSender<LauncherMessage>,
+    ) -> Result<bool> {
+        self.run_update(message_sender, false).await
+    }
+
+    async fn run_update(
+        &self,
+        message_sender: mpsc::UnboundedSender<LauncherMessage>,
+        notify_when_current: bool,
+    ) -> Result<bool> {
         send_message(
             &message_sender,
             LauncherMessage::SetStatus("Verificando update do launcher...".to_string()),
@@ -69,14 +84,16 @@ impl LauncherUpdateManager {
             .launcher
             .ok_or_else(|| anyhow!("Metadata remota nao contem release do launcher"))?;
 
-        if !self.should_install_release(&release)? {
-            send_message(
-                &message_sender,
-                LauncherMessage::SetTempMessage("Launcher ja esta atualizado".to_string()),
-            )?;
-            send_message(&message_sender, LauncherMessage::DownloadProgress(1.0))?;
-            send_message(&message_sender, LauncherMessage::SetProcessing(false))?;
-            return Ok(());
+        if !self.should_install_release(&release, notify_when_current)? {
+            if notify_when_current {
+                send_message(
+                    &message_sender,
+                    LauncherMessage::SetTempMessage("Launcher ja esta atualizado".to_string()),
+                )?;
+                send_message(&message_sender, LauncherMessage::DownloadProgress(1.0))?;
+                send_message(&message_sender, LauncherMessage::SetProcessing(false))?;
+            }
+            return Ok(false);
         }
 
         let update_dir = self.state_path.join("launcher-update");
@@ -146,12 +163,20 @@ impl LauncherUpdateManager {
         send_message(&message_sender, LauncherMessage::DownloadProgress(1.0))?;
         send_message(&message_sender, LauncherMessage::RestartLauncherForUpdate)?;
 
-        Ok(())
+        Ok(true)
     }
 
-    fn should_install_release(&self, release: &LauncherRelease) -> Result<bool> {
+    fn should_install_release(
+        &self,
+        release: &LauncherRelease,
+        install_when_ambiguous: bool,
+    ) -> Result<bool> {
         let Some(remote_version) = release.version.as_deref() else {
-            return Ok(true);
+            if let Some(expected_exe_hash) = release.exe_sha256.as_deref() {
+                return self.current_exe_hash_differs(expected_exe_hash);
+            }
+
+            return Ok(install_when_ambiguous);
         };
 
         let remote_version = parse_version(remote_version)?;
@@ -169,6 +194,10 @@ impl LauncherUpdateManager {
             return Ok(false);
         };
 
+        self.current_exe_hash_differs(expected_exe_hash)
+    }
+
+    fn current_exe_hash_differs(&self, expected_exe_hash: &str) -> Result<bool> {
         match std::env::current_exe() {
             Ok(current_exe) if current_exe.exists() => {
                 Ok(hash_file(&current_exe)? != expected_exe_hash.to_ascii_lowercase())
@@ -187,9 +216,9 @@ async fn fetch_downloads_metadata(http_client: &reqwest::Client) -> Result<Downl
         .error_for_status()
         .with_context(|| format!("Metadata rejeitada por {}", DOWNLOADS_METADATA_URL))?;
 
-    response
-        .json::<DownloadsMetadata>()
-        .await
+    let metadata_raw = response.text().await.context("Falha ao ler metadata")?;
+    let metadata_raw = metadata_raw.trim_start_matches('\u{feff}');
+    serde_json::from_str::<DownloadsMetadata>(metadata_raw)
         .context("Metadata de downloads invalida")
 }
 

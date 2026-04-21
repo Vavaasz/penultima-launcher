@@ -704,6 +704,40 @@ impl GameLauncher {
                 }
 
                 info!("Verificando atualizações iniciais...");
+                if let Some(sender) = message_sender.clone() {
+                    let launcher_update_manager = launcher_update::LauncherUpdateManager::new(
+                        download_path.clone(),
+                        state_path.clone(),
+                    );
+
+                    match launcher_update_manager
+                        .update_launcher_if_available(sender.clone())
+                        .await
+                    {
+                        Ok(true) => {
+                            info!("Update do launcher encontrado; reiniciando para aplicar");
+                            return;
+                        }
+                        Ok(false) => {
+                            info!("Launcher ja esta atualizado");
+                        }
+                        Err(error) => {
+                            info!(
+                                "Falha ao verificar update automatico do launcher: {:#}",
+                                error
+                            );
+                        }
+                    }
+                }
+
+                if let Some(sender) = message_sender.clone() {
+                    let _ = sender.send(LauncherMessage::SetStatus(
+                        "Verificando atualizacoes...".to_string(),
+                    ));
+                    let _ = sender.send(LauncherMessage::DownloadProgress(0.0));
+                    let _ = sender.send(LauncherMessage::SetProcessing(true));
+                }
+
                 match updates::UpdateManager::check_initial_updates(&game_path, &state_path).await {
                     Ok(needs_update) => {
                         if needs_update {
