@@ -59,11 +59,10 @@ struct GameLauncher {
     auto_hide: bool,                    // Flag para controlar o auto-hide do launcher
     temp_message_time: Option<Instant>, // Momento em que uma mensagem temporária foi definida
     is_alert_message: bool,             // Flag para mensagens de alerta que devem ser destacadas
-    is_closing_attempted: bool, // Nova flag para indicar que o usuário tentou fechar a janela
     window_manager: Option<WindowManager>, // Gerenciador de janela
     background_texture: Option<egui::TextureHandle>, // Nova propriedade para o papel de parede
     logo_texture: Option<egui::TextureHandle>, // Nova propriedade para o logo
-    show_footer: bool,          // Nova variável para controlar a visibilidade do rodapé
+    show_footer: bool,                  // Nova variável para controlar a visibilidade do rodapé
     show_force_update_modal: bool, // Nova variável para controlar a visibilidade do modal de confirmação
     disable_auto_start: bool,      // Nova variável para controlar o início automático
     config_modal: Option<ConfigModal>, // Novo campo para o modal de configuração
@@ -122,7 +121,6 @@ impl Default for GameLauncher {
             auto_hide: false, // O launcher só vai para a tray quando o usuário pedir
             temp_message_time: None,
             is_alert_message: false,
-            is_closing_attempted: false,
             window_manager: None,
             background_texture: None,
             logo_texture: None,             // Inicializar o logo como None
@@ -847,35 +845,25 @@ impl GameLauncher {
             if time.elapsed() > timeout_duration {
                 info!("Limpando mensagem temporária: {}", self.status);
 
-                // Limpar a mensagem temporária, incluindo a de fechamento
+                // Limpar a mensagem temporária
                 self.temp_message_time = None;
                 self.is_alert_message = false;
 
-                // Se ainda estamos com a flag de fechamento ativa, apenas desativá-la
-                // sem acionar novamente a mensagem
-                if self.is_closing_attempted {
-                    info!("Desativando flag de tentativa de fechamento após exibição temporária");
-                    self.is_closing_attempted = false;
-                }
-
-                // Se o usuário tentou fechar a janela, mas agora não há mais clientes, podemos resetar a flag
-                if self.temp_message_time.is_none() && !self.is_closing_attempted {
-                    let (has_main, additional_count) = self.game_client.sync_client_state();
-                    // Atualizar para o status normal de acordo com o estado dos clientes
-                    self.status = if has_main || additional_count > 0 {
-                        if has_main {
-                            if additional_count == 0 {
-                                "Cliente em execução".to_string()
-                            } else {
-                                format!("Clientes em execução")
-                            }
+                let (has_main, additional_count) = self.game_client.sync_client_state();
+                // Atualizar para o status normal de acordo com o estado dos clientes
+                self.status = if has_main || additional_count > 0 {
+                    if has_main {
+                        if additional_count == 0 {
+                            "Cliente em execução".to_string()
                         } else {
                             "Clientes em execução".to_string()
                         }
                     } else {
-                        "Pronto para jogar".to_string()
-                    };
-                }
+                        "Clientes em execução".to_string()
+                    }
+                } else {
+                    "Pronto para jogar".to_string()
+                };
                 ctx.request_repaint();
             }
         }
@@ -898,20 +886,8 @@ impl GameLauncher {
         let is_game_running = self.is_game_running();
         let (_, additional_count) = self.game_client.sync_client_state();
 
-        // Se o usuário tentou fechar a janela, mas agora não há mais clientes, podemos resetar a flag
-        if self.is_closing_attempted && !is_game_running && additional_count == 0 {
-            info!(
-                "Todos os clientes foram fechados após tentativa de fechamento. Resetando flags."
-            );
-            self.is_closing_attempted = false;
-            self.is_alert_message = false;
-            self.temp_message_time = None;
-            self.status = "Pronto para jogar".to_string();
-            ctx.request_repaint();
-        }
-
-        // Não atualizar o status se houver uma mensagem temporária ou tentativa de fechamento
-        if !self.temp_message_time.is_some() && !self.is_closing_attempted {
+        // Não atualizar o status se houver uma mensagem temporária
+        if !self.temp_message_time.is_some() {
             if is_game_running && additional_count > 0 {
                 // Cliente principal e clientes adicionais em execução
                 self.status = "Clientes em execução".to_string();
@@ -1004,11 +980,7 @@ impl GameLauncher {
                             self.status = message.clone();
                             self.temp_message_time = Some(Instant::now());
                             // Verifica se é um alerta específico
-                            if message.contains("Feche todos os clientes antes de sair") {
-                                self.is_alert_message = true;
-                            } else {
-                                self.is_alert_message = false;
-                            }
+                            self.is_alert_message = false;
                             info!("Mensagem temporária definida via channel: {}", message);
                         }
                         LauncherMessage::PingResult(ping) => {
@@ -1387,35 +1359,8 @@ impl eframe::App for GameLauncher {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 return;
             }
-            // Verifica se há clientes ativos
-            let (has_main, additional_count) = self.game_client.sync_client_state();
-            if has_main || additional_count > 0 {
-                info!(
-                    "Há clientes ativos: {} clientes adicionais, main: {}",
-                    additional_count, has_main
-                );
-                // Salvar a mensagem atual para debug
-                let old_status = self.status.clone();
-
-                // Definir mensagem temporária e marcar tentativa de fechamento
-                self.status = "Feche todos os clientes antes de sair!".to_string();
-                self.temp_message_time = Some(Instant::now());
-                self.is_alert_message = true;
-                self.is_closing_attempted = true; // Marcar que o usuário tentou fechar a janela
-
-                info!("Status alterado de '{}' para '{}'", old_status, self.status);
-
-                // Forçar repaint imediato da UI - usando múltiplos métodos para garantir
-                self.needs_repaint.store(true, Ordering::SeqCst);
-                ctx.request_repaint();
-
-                // Impede o fechamento mantendo a janela aberta
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            } else {
-                info!("Nenhum cliente ativo, permitindo fechamento");
-                // Permite o fechamento
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
         }
 
         // Chamada para o método de atualização personalizado
