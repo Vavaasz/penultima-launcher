@@ -6,6 +6,7 @@ What it does:
 
 - downloads and updates the public client feed from `Vavaasz/penultima-client`
 - downloads and updates the website-hosted client feed from `ultimaotserv.online/downloads/client-feed`
+- updates the launcher executable from the website-hosted `Penultima-Launcher.zip`
 - only updates managed client folders: `assets`, `bin`, and `sounds`
 - keeps launcher state in AppData instead of writing manifests into the client root
 - starts the client with production defaults for `ultimaotserv.online`
@@ -40,6 +41,7 @@ The second command rebuilds only the public client feed from `D:\Server\Cliente-
 The third command rebuilds the launcher release and writes `D:\Server\_publish\Penultima-Launcher.zip`.
 
 The fourth command republishes the launcher zip, client feed, and portable client zip directly into `D:\Server\UniServerZ\www\downloads` from your local workstation.
+It also writes `penultima-downloads.json`, which the launcher's `Update Launcher` button uses to find, verify, stage, replace, and restart the launcher executable.
 
 `install-client-feed-hook.ps1` installs a local `post-commit` hook in `D:\Server\Cliente-15.23-Prod` that runs `sounds\publish-website-client-assets.ps1`, so each client commit refreshes the website `client-feed`, bootstrap feed zip, portable client zip, and metadata from the current local client state.
 

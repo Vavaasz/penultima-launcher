@@ -479,6 +479,36 @@ impl GameLauncher {
                         self.show_force_update_modal = true;
                     }
                 }
+
+                if ui
+                    .add_sized(
+                        [140.0, 30.0],
+                        egui::Button::new(
+                            egui::RichText::new("Update Launcher")
+                                .size(14.0)
+                                .color(egui::Color32::from_rgb(220, 220, 220)),
+                        )
+                        .fill(egui::Color32::from_rgba_unmultiplied(
+                            SURFACE_RGB.0,
+                            SURFACE_RGB.1,
+                            SURFACE_RGB.2,
+                            220,
+                        ))
+                        .corner_radius(12.0)
+                        .stroke(egui::Stroke::NONE),
+                    )
+                    .clicked()
+                {
+                    if has_clients {
+                        self.status =
+                            "Feche todos os clientes antes de atualizar o launcher".to_string();
+                        self.temp_message_time = Some(std::time::Instant::now());
+                        self.is_alert_message = true;
+                        ctx.request_repaint();
+                    } else {
+                        self.start_launcher_update(ctx);
+                    }
+                }
             });
         }
 

@@ -14,4 +14,5 @@ pub enum LauncherMessage {
     Error(String),
     SetTempMessage(String),
     PingResult(Option<u32>), // Resultado do ping do servidor
+    RestartLauncherForUpdate,
 }

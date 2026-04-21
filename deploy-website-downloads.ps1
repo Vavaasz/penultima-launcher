@@ -52,8 +52,16 @@ $launcherReleaseDir = Join-Path (Join-Path (Split-Path -Parent $LauncherRoot) "_
 $publishLauncherScript = Join-Path $LauncherRoot "publish-launcher-release.ps1"
 $publishWebsiteClientAssetsScript = Join-Path $ClientRoot "sounds\publish-website-client-assets.ps1"
 $metadataPath = Join-Path $downloadsRoot "penultima-downloads.json"
+$launcherCargoToml = Join-Path $LauncherRoot "Cargo.toml"
 
 New-Item -ItemType Directory -Path $downloadsRoot -Force | Out-Null
+
+$launcherVersionMatch = Select-String -Path $launcherCargoToml -Pattern '^\s*version\s*=\s*"([^"]+)"' |
+  Select-Object -First 1
+if (-not $launcherVersionMatch) {
+  throw "Could not read launcher version from $launcherCargoToml"
+}
+$launcherVersion = $launcherVersionMatch.Matches[0].Groups[1].Value
 
 if (-not $SkipClient) {
   if (-not (Test-Path -LiteralPath $publishWebsiteClientAssetsScript)) {
@@ -112,11 +120,16 @@ $feedVersion = if (Test-Path $feedVersionPath) {
 $launcherMetadata = $null
 if (Test-Path $launcherZipPath) {
   $launcherMetadata = [ordered]@{
+    version = $launcherVersion
     zip = "downloads/Penultima-Launcher.zip"
     sha256 = (Get-FileHash $launcherZipPath -Algorithm SHA256).Hash
     size = (Get-Item $launcherZipPath).Length
     signed = $launcherSigned
     signature_status = $launcherSignatureStatus
+  }
+
+  if (Test-Path $launcherExePath) {
+    $launcherMetadata["exe_sha256"] = (Get-FileHash $launcherExePath -Algorithm SHA256).Hash
   }
 }
 

@@ -27,8 +27,14 @@ pub const HTTPS_PORT: u16 = 8443;
 // ================================
 
 /// URL base do feed publico do cliente hospedado no site
-pub const CLIENT_GITHUB_RAW_BASE_URL: &str =
-    "https://ultimaotserv.online/downloads/client-feed";
+pub const CLIENT_GITHUB_RAW_BASE_URL: &str = "https://ultimaotserv.online/downloads/client-feed";
+
+/// Host publico usado para resolver arquivos publicados no site
+pub const WEBSITE_BASE_URL: &str = "https://ultimaotserv.online";
+
+/// Metadata publica dos downloads publicados no site
+pub const DOWNLOADS_METADATA_URL: &str =
+    "https://ultimaotserv.online/downloads/penultima-downloads.json";
 
 /// Arquivo ZIP do feed completo do cliente para bootstrap rapido
 pub const CLIENT_GITHUB_ARCHIVE_URL: &str =

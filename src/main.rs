@@ -20,6 +20,7 @@ mod config_modal;
 mod constants;
 mod game_client;
 mod instance_manager;
+mod launcher_update;
 mod logger;
 mod message_system;
 mod tray_manager;
@@ -73,6 +74,7 @@ struct GameLauncher {
     was_hidden: bool, // Controla transição de visibilidade para otimizar CPU quando minimizado
     clients_hidden_to_tray: bool,
     tray_manager: Option<TrayManager>,
+    restart_for_launcher_update: bool,
 }
 
 impl Default for GameLauncher {
@@ -135,6 +137,7 @@ impl Default for GameLauncher {
             was_hidden: false,
             clients_hidden_to_tray: false,
             tray_manager: None,
+            restart_for_launcher_update: false,
         };
 
         // Carregar versão do client.exe
@@ -473,6 +476,42 @@ impl GameLauncher {
         }
     }
 
+    pub fn start_launcher_update(&mut self, ctx: &egui::Context) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.message_receiver = Some(rx);
+        self.message_sender = Some(tx.clone());
+        self.status = "Atualizando launcher...".to_string();
+        self.is_processing = true;
+        self.progress = 0.0;
+        self.temp_message_time = None;
+        self.is_alert_message = false;
+        ctx.request_repaint();
+
+        let update_manager = launcher_update::LauncherUpdateManager::new(
+            self.download_path.clone(),
+            self.state_path.clone(),
+        );
+
+        tokio::spawn(async move {
+            if let Err(error) = update_manager.update_launcher(tx.clone()).await {
+                info!("Erro durante update do launcher: {}", error);
+                let _ = tx.send(LauncherMessage::SetStatus(format!(
+                    "Erro ao atualizar launcher: {:#}",
+                    error
+                )));
+                let _ = tx.send(LauncherMessage::SetProcessing(false));
+            }
+        });
+    }
+
+    fn restart_launcher_for_update(&mut self, ctx: &egui::Context) {
+        self.restart_for_launcher_update = true;
+        self.status = "Reiniciando launcher para aplicar update...".to_string();
+        self.is_processing = false;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        ctx.request_repaint();
+    }
+
     fn minimize_to_tray(&mut self, ctx: &egui::Context) {
         self.hide_launcher_to_tray(ctx);
         self.status = "Launcher enviado para a system tray".to_string();
@@ -534,6 +573,7 @@ impl GameLauncher {
             // Trabalho essencial mínimo quando escondido:
 
             // 1. Drenar canal de mensagens (necessário para detectar comandos)
+            let mut should_restart_for_launcher_update = false;
             if let Some(receiver) = &mut self.message_receiver {
                 while let Ok(message) = receiver.try_recv() {
                     match message {
@@ -563,9 +603,16 @@ impl GameLauncher {
                         LauncherMessage::DownloadProgress(progress) => {
                             self.progress = progress;
                         }
+                        LauncherMessage::RestartLauncherForUpdate => {
+                            should_restart_for_launcher_update = true;
+                        }
                         _ => {} // Outras mensagens processadas quando visível
                     }
                 }
+            }
+            if should_restart_for_launcher_update {
+                self.restart_launcher_for_update(ctx);
+                return;
             }
 
             // 2. Verificar se o processo principal do jogo terminou (para re-mostrar a janela)
@@ -934,6 +981,9 @@ impl GameLauncher {
                             self.server_ping = ping;
                             self.last_ping_check = Some(Instant::now());
                         }
+                        LauncherMessage::RestartLauncherForUpdate => {
+                            self.restart_launcher_for_update(ctx);
+                        }
                     }
                 }
                 ctx.request_repaint();
@@ -1298,6 +1348,11 @@ impl eframe::App for GameLauncher {
         // Interceptar evento de fechamento
         if ctx.input(|i| i.viewport().close_requested()) {
             info!("Evento de fechamento detectado!");
+            if self.restart_for_launcher_update {
+                info!("Fechando launcher para aplicar update automatico");
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                return;
+            }
             // Verifica se há clientes ativos
             let (has_main, additional_count) = self.game_client.sync_client_state();
             if has_main || additional_count > 0 {
