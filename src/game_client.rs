@@ -12,11 +12,13 @@ use winapi::shared::minwindef::{BOOL, LPARAM, TRUE};
 use winapi::shared::windef::HWND;
 use winapi::um::shellapi::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
 use winapi::um::winuser::{
-    EnumWindows, GetWindowTextLengthW, GetWindowThreadProcessId, IsWindowVisible, SW_HIDE,
-    SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow,
+    EnumWindows, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
+    SW_HIDE, SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow,
 };
 use windows::Win32::Foundation::{CloseHandle, HANDLE, STILL_ACTIVE, WAIT_TIMEOUT};
 use windows::Win32::System::Threading::{GetExitCodeProcess, GetProcessId, WaitForSingleObject};
+
+const CLIENT_WINDOW_TITLE_PREFIX: &str = "Tibia - ";
 
 pub struct WindowState {
     pub visible: bool,
@@ -99,6 +101,19 @@ impl Drop for ProcessHandle {
 struct ClientWindowSearch {
     pids: HashSet<u32>,
     windows: Vec<HWND>,
+}
+
+struct ClientWindow {
+    hwnd: HWND,
+    info: ClientWindowInfo,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClientWindowInfo {
+    pub pid: u32,
+    pub title: String,
+    pub character_name: String,
+    pub visible: bool,
 }
 
 unsafe extern "system" fn enum_client_windows(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -223,33 +238,67 @@ impl GameClient {
     pub fn minimize_clients_to_tray(&mut self) -> usize {
         self.sync_client_state();
 
-        let mut hidden_count = 0;
-        for hwnd in self.tracked_client_windows() {
+        let mut hidden_pids = HashSet::new();
+        for client_window in self.tracked_client_window_details() {
             unsafe {
-                if IsWindowVisible(hwnd) != 0 {
-                    ShowWindow(hwnd, SW_HIDE);
-                    hidden_count += 1;
+                if client_window.info.visible {
+                    ShowWindow(client_window.hwnd, SW_HIDE);
+                    hidden_pids.insert(client_window.info.pid);
                 }
             }
         }
 
-        hidden_count
+        hidden_pids.len()
     }
 
     pub fn restore_clients_from_tray(&mut self) -> usize {
         self.sync_client_state();
 
-        let mut restored_count = 0;
-        for hwnd in self.tracked_client_windows() {
+        let mut restored_pids = HashSet::new();
+        for client_window in self.tracked_client_window_details() {
             unsafe {
-                ShowWindow(hwnd, SW_RESTORE);
-                ShowWindow(hwnd, SW_SHOW);
-                SetForegroundWindow(hwnd);
+                ShowWindow(client_window.hwnd, SW_RESTORE);
+                ShowWindow(client_window.hwnd, SW_SHOW);
+                SetForegroundWindow(client_window.hwnd);
             }
-            restored_count += 1;
+            restored_pids.insert(client_window.info.pid);
         }
 
-        restored_count
+        restored_pids.len()
+    }
+
+    pub fn restore_client_from_tray(&mut self, pid: u32) -> Option<ClientWindowInfo> {
+        self.sync_client_state();
+
+        let mut restored_client = None;
+        for client_window in self.tracked_client_window_details() {
+            if client_window.info.pid != pid {
+                continue;
+            }
+
+            unsafe {
+                ShowWindow(client_window.hwnd, SW_RESTORE);
+                ShowWindow(client_window.hwnd, SW_SHOW);
+                SetForegroundWindow(client_window.hwnd);
+            }
+
+            if restored_client.is_none() {
+                restored_client = Some(client_window.info);
+            }
+        }
+
+        restored_client
+    }
+
+    pub fn hidden_client_window_infos(&mut self) -> Vec<ClientWindowInfo> {
+        self.sync_client_state();
+        unique_client_window_infos(
+            self.tracked_client_window_details()
+                .into_iter()
+                .filter(|client_window| !client_window.info.visible)
+                .map(|client_window| client_window.info)
+                .collect(),
+        )
     }
 
     fn tracked_client_pids(&self) -> HashSet<u32> {
@@ -282,6 +331,104 @@ impl GameClient {
 
         search.windows
     }
+
+    fn tracked_client_window_details(&self) -> Vec<ClientWindow> {
+        self.tracked_client_windows()
+            .into_iter()
+            .filter_map(client_window_from_hwnd)
+            .collect()
+    }
+}
+
+fn client_window_from_hwnd(hwnd: HWND) -> Option<ClientWindow> {
+    let mut pid = 0u32;
+
+    let (title, visible) = unsafe {
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        (window_title(hwnd)?, IsWindowVisible(hwnd) != 0)
+    };
+
+    if pid == 0 {
+        return None;
+    }
+
+    let character_name = character_name_from_window_title(&title, pid);
+
+    Some(ClientWindow {
+        hwnd,
+        info: ClientWindowInfo {
+            pid,
+            title,
+            character_name,
+            visible,
+        },
+    })
+}
+
+fn window_title(hwnd: HWND) -> Option<String> {
+    let length = unsafe { GetWindowTextLengthW(hwnd) };
+    if length <= 0 {
+        return None;
+    }
+
+    let mut buffer = vec![0u16; length as usize + 1];
+    let copied = unsafe { GetWindowTextW(hwnd, buffer.as_mut_ptr(), buffer.len() as i32) };
+    if copied <= 0 {
+        return None;
+    }
+
+    let title = String::from_utf16_lossy(&buffer[..copied as usize])
+        .trim()
+        .to_string();
+    if title.is_empty() { None } else { Some(title) }
+}
+
+pub fn character_name_from_window_title(title: &str, pid: u32) -> String {
+    let trimmed = title.trim();
+    if let Some(character_name) = trimmed
+        .strip_prefix(CLIENT_WINDOW_TITLE_PREFIX.trim_end())
+        .map(str::trim)
+    {
+        if !character_name.is_empty() {
+            return character_name.to_string();
+        }
+    }
+
+    if trimmed.is_empty() || trimmed == CLIENT_WINDOW_TITLE_PREFIX.trim_end() {
+        return format!("Cliente {}", pid);
+    }
+
+    trimmed.to_string()
+}
+
+fn client_window_title_rank(title: &str) -> usize {
+    title
+        .trim()
+        .strip_prefix(CLIENT_WINDOW_TITLE_PREFIX)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|_| 0)
+        .unwrap_or(1)
+}
+
+fn unique_client_window_infos(mut infos: Vec<ClientWindowInfo>) -> Vec<ClientWindowInfo> {
+    infos.sort_by(|a, b| {
+        client_window_title_rank(&a.title)
+            .cmp(&client_window_title_rank(&b.title))
+            .then_with(|| a.pid.cmp(&b.pid))
+    });
+
+    let mut seen_pids = HashSet::new();
+    infos.retain(|info| seen_pids.insert(info.pid));
+
+    infos.sort_by(|a, b| {
+        a.character_name
+            .to_lowercase()
+            .cmp(&b.character_name.to_lowercase())
+            .then_with(|| a.pid.cmp(&b.pid))
+    });
+
+    infos
 }
 
 fn wide_null(value: &OsStr) -> Vec<u16> {
@@ -324,7 +471,7 @@ pub fn show_window(window_state: &Arc<Mutex<WindowState>>) {
 
 #[cfg(test)]
 mod tests {
-    use super::GameClient;
+    use super::{ClientWindowInfo, GameClient, character_name_from_window_title};
     use std::path::PathBuf;
 
     #[test]
@@ -339,5 +486,58 @@ mod tests {
         assert_eq!(found, client);
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn extracts_character_name_from_tibia_window_title() {
+        assert_eq!(
+            character_name_from_window_title("Tibia - Waldir", 123),
+            "Waldir"
+        );
+        assert_eq!(
+            character_name_from_window_title("  Tibia -  Mage Name  ", 123),
+            "Mage Name"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_title_or_pid_for_client_name() {
+        assert_eq!(
+            character_name_from_window_title("Custom Client Title", 55),
+            "Custom Client Title"
+        );
+        assert_eq!(
+            character_name_from_window_title("Tibia - ", 55),
+            "Cliente 55"
+        );
+        assert_eq!(character_name_from_window_title("", 55), "Cliente 55");
+    }
+
+    #[test]
+    fn unique_client_infos_prefers_tibia_character_title() {
+        let infos = super::unique_client_window_infos(vec![
+            ClientWindowInfo {
+                pid: 10,
+                title: "Other Window".to_string(),
+                character_name: "Other Window".to_string(),
+                visible: false,
+            },
+            ClientWindowInfo {
+                pid: 10,
+                title: "Tibia - Waldir".to_string(),
+                character_name: "Waldir".to_string(),
+                visible: false,
+            },
+            ClientWindowInfo {
+                pid: 20,
+                title: "Tibia - Alice".to_string(),
+                character_name: "Alice".to_string(),
+                visible: false,
+            },
+        ]);
+
+        assert_eq!(infos.len(), 2);
+        assert_eq!(infos[0].character_name, "Alice");
+        assert_eq!(infos[1].character_name, "Waldir");
     }
 }

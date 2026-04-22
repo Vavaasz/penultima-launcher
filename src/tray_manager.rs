@@ -1,30 +1,37 @@
 use anyhow::{Context, Result};
 use eframe::egui::IconData;
 use image;
+use log::warn;
 use std::sync::{
     Arc,
     mpsc::{self, Receiver, Sender},
 };
 use tray_icon::{
     Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent, TrayIconId,
-    menu::{Menu, MenuEvent, MenuId, MenuItemBuilder},
+    menu::{Menu, MenuEvent, MenuId, MenuItem, MenuItemBuilder, Submenu, SubmenuBuilder},
 };
 
 use crate::constants::APP_NAME;
-use crate::game_client::{WindowState, show_window};
+use crate::game_client::{ClientWindowInfo, WindowState, show_window};
 
 pub enum TrayAction {
     ShowLauncher,
     RestoreClients,
+    RestoreClient(u32),
     MinimizeClients,
     QuitLauncher,
 }
 
+const CLIENT_RESTORE_ID_PREFIX: &str = "client-restore-pid-";
+
 pub struct TrayManager {
     launcher_icon: Option<TrayIcon>,
+    client_restore_submenu: Option<Submenu>,
+    client_restore_items: Vec<MenuItem>,
     launcher_icon_id: TrayIconId,
     launcher_restore_id: MenuId,
     client_restore_id: MenuId,
+    client_restore_submenu_id: MenuId,
     client_minimize_id: MenuId,
     launcher_quit_id: MenuId,
     launcher_icon_visible: bool,
@@ -38,9 +45,12 @@ impl TrayManager {
         let (action_sender, action_receiver) = mpsc::channel();
         Self {
             launcher_icon: None,
+            client_restore_submenu: None,
+            client_restore_items: Vec::new(),
             launcher_icon_id: TrayIconId::new("launcher-main"),
             launcher_restore_id: MenuId::new("launcher-restore"),
             client_restore_id: MenuId::new("client-restore"),
+            client_restore_submenu_id: MenuId::new("client-restore-one"),
             client_minimize_id: MenuId::new("client-minimize"),
             launcher_quit_id: MenuId::new("launcher-quit"),
             launcher_icon_visible: false,
@@ -65,6 +75,13 @@ impl TrayManager {
             .enabled(true)
             .build();
 
+        let restore_client_submenu = SubmenuBuilder::new()
+            .text("Restaurar cliente")
+            .id(self.client_restore_submenu_id.clone())
+            .enabled(false)
+            .build()
+            .context("Falha ao criar submenu Restaurar cliente")?;
+
         let minimize_clients_item = MenuItemBuilder::new()
             .text("Minimizar clientes")
             .id(self.client_minimize_id.clone())
@@ -83,6 +100,9 @@ impl TrayManager {
         tray_menu
             .append(&restore_clients_item)
             .context("Falha ao adicionar item Restaurar clientes")?;
+        tray_menu
+            .append(&restore_client_submenu)
+            .context("Falha ao adicionar submenu Restaurar cliente")?;
         tray_menu
             .append(&minimize_clients_item)
             .context("Falha ao adicionar item Minimizar clientes")?;
@@ -104,6 +124,8 @@ impl TrayManager {
             .context("Falha ao ocultar icone principal da tray")?;
 
         self.launcher_icon = Some(tray_icon);
+        self.client_restore_submenu = Some(restore_client_submenu);
+        self.client_restore_items.clear();
         self.launcher_icon_visible = false;
         self.clients_icon_visible = false;
         self.install_event_handlers(window_state);
@@ -144,6 +166,46 @@ impl TrayManager {
         actions
     }
 
+    pub fn update_hidden_client_entries(&mut self, clients: &[ClientWindowInfo]) {
+        let Some(restore_submenu) = self.client_restore_submenu.clone() else {
+            return;
+        };
+
+        for item in self.client_restore_items.drain(..) {
+            if let Err(error) = restore_submenu.remove(&item) {
+                warn!("Falha ao remover item de cliente da tray: {}", error);
+            }
+        }
+
+        if clients.is_empty() {
+            restore_submenu.set_enabled(false);
+            return;
+        }
+
+        for client in clients {
+            let item = MenuItemBuilder::new()
+                .text(format!(
+                    "Restaurar {}",
+                    escape_menu_label(&client.character_name)
+                ))
+                .id(client_restore_menu_id(client.pid))
+                .enabled(true)
+                .build();
+
+            if let Err(error) = restore_submenu.append(&item) {
+                warn!(
+                    "Falha ao adicionar item de cliente {} na tray: {}",
+                    client.pid, error
+                );
+                continue;
+            }
+
+            self.client_restore_items.push(item);
+        }
+
+        restore_submenu.set_enabled(true);
+    }
+
     fn install_event_handlers(&self, window_state: Arc<std::sync::Mutex<WindowState>>) {
         let menu_sender = self.action_sender.clone();
         let menu_window_state = Arc::clone(&window_state);
@@ -161,6 +223,11 @@ impl TrayManager {
 
             if event.id == client_restore_id {
                 let _ = menu_sender.send(TrayAction::RestoreClients);
+                return;
+            }
+
+            if let Some(pid) = pid_from_client_restore_menu_id(&event.id) {
+                let _ = menu_sender.send(TrayAction::RestoreClient(pid));
                 return;
             }
 
@@ -243,5 +310,40 @@ impl TrayManager {
             width: icon_width as _,
             height: icon_height as _,
         }))
+    }
+}
+
+fn client_restore_menu_id(pid: u32) -> MenuId {
+    MenuId::new(format!("{}{}", CLIENT_RESTORE_ID_PREFIX, pid))
+}
+
+fn pid_from_client_restore_menu_id(id: &MenuId) -> Option<u32> {
+    id.as_ref()
+        .strip_prefix(CLIENT_RESTORE_ID_PREFIX)
+        .and_then(|pid| pid.parse().ok())
+}
+
+fn escape_menu_label(label: &str) -> String {
+    label.replace('&', "&&")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{client_restore_menu_id, escape_menu_label, pid_from_client_restore_menu_id};
+    use tray_icon::menu::MenuId;
+
+    #[test]
+    fn parses_dynamic_client_restore_menu_ids() {
+        let id = client_restore_menu_id(12345);
+        assert_eq!(pid_from_client_restore_menu_id(&id), Some(12345));
+        assert_eq!(
+            pid_from_client_restore_menu_id(&MenuId::new("client-restore")),
+            None
+        );
+    }
+
+    #[test]
+    fn escapes_ampersands_in_menu_labels() {
+        assert_eq!(escape_menu_label("A&B"), "A&&B");
     }
 }

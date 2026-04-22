@@ -210,36 +210,55 @@ impl GameLauncher {
             match action {
                 TrayAction::ShowLauncher => self.restore_launcher_from_tray(ctx),
                 TrayAction::RestoreClients => self.restore_clients_from_tray(ctx),
+                TrayAction::RestoreClient(pid) => self.restore_client_from_tray(ctx, pid),
                 TrayAction::MinimizeClients => self.minimize_clients_to_tray(ctx),
                 TrayAction::QuitLauncher => std::process::exit(0),
             }
         }
     }
 
-    fn minimize_clients_to_tray(&mut self, ctx: &egui::Context) {
-        let hidden_count = self.game_client.minimize_clients_to_tray();
+    fn refresh_hidden_client_restore_menu(&mut self) -> usize {
+        let hidden_clients = self.game_client.hidden_client_window_infos();
+        let hidden_count = hidden_clients.len();
 
-        if hidden_count > 0 {
-            self.clients_hidden_to_tray = true;
-            if let Some(tray_manager) = self.tray_manager_mut() {
+        if let Some(tray_manager) = self.tray_manager_mut() {
+            tray_manager.update_hidden_client_entries(&hidden_clients);
+        }
+
+        hidden_count
+    }
+
+    fn set_clients_tray_icon_visible(&mut self, visible: bool) {
+        if let Some(tray_manager) = self.tray_manager_mut() {
+            if visible {
                 tray_manager.show_clients_icon();
-            }
-            self.status = if hidden_count == 1 {
-                "Cliente enviado para a system tray".to_string()
             } else {
-                format!("{} clientes enviados para a system tray", hidden_count)
-            };
-        } else if self.game_client.has_tracked_clients() {
-            self.clients_hidden_to_tray = true;
-            if let Some(tray_manager) = self.tray_manager_mut() {
-                tray_manager.show_clients_icon();
-            }
-            self.status = "Clientes ja estao na system tray".to_string();
-        } else {
-            self.clients_hidden_to_tray = false;
-            if let Some(tray_manager) = self.tray_manager_mut() {
                 tray_manager.hide_clients_icon();
             }
+        }
+    }
+
+    fn minimize_clients_to_tray(&mut self, ctx: &egui::Context) {
+        let hidden_count = self.game_client.minimize_clients_to_tray();
+        let hidden_client_count = self.refresh_hidden_client_restore_menu();
+
+        if hidden_count > 0 || hidden_client_count > 0 {
+            self.clients_hidden_to_tray = true;
+            self.set_clients_tray_icon_visible(true);
+            self.status = if hidden_count == 1 {
+                "Cliente enviado para a system tray".to_string()
+            } else if hidden_count > 1 {
+                format!("{} clientes enviados para a system tray", hidden_count)
+            } else {
+                "Clientes ja estao na system tray".to_string()
+            };
+        } else if self.game_client.has_tracked_clients() {
+            self.clients_hidden_to_tray = false;
+            self.set_clients_tray_icon_visible(false);
+            self.status = "Nenhuma janela de cliente encontrada".to_string();
+        } else {
+            self.clients_hidden_to_tray = false;
+            self.set_clients_tray_icon_visible(false);
             self.status = "Nenhum cliente aberto pelo launcher".to_string();
         }
 
@@ -250,28 +269,23 @@ impl GameLauncher {
 
     fn restore_clients_from_tray(&mut self, ctx: &egui::Context) {
         let restored_count = self.game_client.restore_clients_from_tray();
+        let hidden_client_count = self.refresh_hidden_client_restore_menu();
 
         if restored_count > 0 {
-            self.clients_hidden_to_tray = false;
-            if let Some(tray_manager) = self.tray_manager_mut() {
-                tray_manager.hide_clients_icon();
-            }
+            self.clients_hidden_to_tray = hidden_client_count > 0;
+            self.set_clients_tray_icon_visible(hidden_client_count > 0);
             self.status = if restored_count == 1 {
                 "Cliente restaurado".to_string()
             } else {
                 format!("{} clientes restaurados", restored_count)
             };
         } else if self.game_client.has_tracked_clients() {
-            self.clients_hidden_to_tray = true;
-            if let Some(tray_manager) = self.tray_manager_mut() {
-                tray_manager.show_clients_icon();
-            }
+            self.clients_hidden_to_tray = hidden_client_count > 0;
+            self.set_clients_tray_icon_visible(hidden_client_count > 0);
             self.status = "Nenhuma janela de cliente encontrada".to_string();
         } else {
             self.clients_hidden_to_tray = false;
-            if let Some(tray_manager) = self.tray_manager_mut() {
-                tray_manager.hide_clients_icon();
-            }
+            self.set_clients_tray_icon_visible(false);
             self.status = "Nenhum cliente aberto pelo launcher".to_string();
         }
 
@@ -280,12 +294,30 @@ impl GameLauncher {
         ctx.request_repaint();
     }
 
+    fn restore_client_from_tray(&mut self, ctx: &egui::Context, pid: u32) {
+        let restored_client = self.game_client.restore_client_from_tray(pid);
+        let hidden_client_count = self.refresh_hidden_client_restore_menu();
+        self.clients_hidden_to_tray = hidden_client_count > 0;
+        self.set_clients_tray_icon_visible(hidden_client_count > 0);
+
+        self.status = if let Some(client) = restored_client {
+            format!("Cliente {} restaurado", client.character_name)
+        } else if self.game_client.has_tracked_clients() {
+            "Cliente nao encontrado na system tray".to_string()
+        } else {
+            "Nenhum cliente aberto pelo launcher".to_string()
+        };
+
+        self.temp_message_time = Some(Instant::now());
+        self.is_alert_message = false;
+        ctx.request_repaint();
+    }
+
     fn sync_clients_tray_state(&mut self) {
-        if self.clients_hidden_to_tray && !self.game_client.has_tracked_clients() {
-            self.clients_hidden_to_tray = false;
-            if let Some(tray_manager) = self.tray_manager_mut() {
-                tray_manager.hide_clients_icon();
-            }
+        if self.clients_hidden_to_tray {
+            let hidden_client_count = self.refresh_hidden_client_restore_menu();
+            self.clients_hidden_to_tray = hidden_client_count > 0;
+            self.set_clients_tray_icon_visible(hidden_client_count > 0);
         }
     }
 
