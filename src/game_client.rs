@@ -1,19 +1,23 @@
 use anyhow::{Context, Result, anyhow};
 use glob::glob;
 use log::info;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::ffi::OsStr;
+use std::fs;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::ptr::null;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use winapi::shared::minwindef::{BOOL, LPARAM, TRUE};
-use winapi::shared::windef::HWND;
+use winapi::shared::windef::{HWND, RECT};
 use winapi::um::shellapi::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
 use winapi::um::winuser::{
-    EnumWindows, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
-    SW_HIDE, SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow,
+    EnumWindows, GetWindowPlacement, GetWindowTextLengthW, GetWindowTextW,
+    GetWindowThreadProcessId, IsIconic, IsWindowVisible, SW_HIDE, SW_RESTORE, SW_SHOW,
+    SW_SHOWMAXIMIZED, SW_SHOWNORMAL, SetForegroundWindow, SetWindowPlacement, ShowWindow,
+    WINDOWPLACEMENT,
 };
 use windows::Win32::Foundation::{CloseHandle, HANDLE, STILL_ACTIVE, WAIT_TIMEOUT};
 use windows::Win32::System::Threading::{GetExitCodeProcess, GetProcessId, WaitForSingleObject};
@@ -108,6 +112,21 @@ struct ClientWindow {
     info: ClientWindowInfo,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+struct ClientWindowState {
+    left: i32,
+    top: i32,
+    width: i32,
+    height: i32,
+    maximized: bool,
+}
+
+impl ClientWindowState {
+    fn is_valid(self) -> bool {
+        self.width >= 640 && self.height >= 480
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientWindowInfo {
     pub pid: u32,
@@ -133,6 +152,9 @@ unsafe extern "system" fn enum_client_windows(hwnd: HWND, lparam: LPARAM) -> BOO
 pub struct GameClient {
     game_process: Option<ProcessHandle>,
     active_clients: Vec<ProcessHandle>,
+    window_state_path: Option<PathBuf>,
+    last_window_state: Option<ClientWindowState>,
+    pending_window_restore_pids: HashSet<u32>,
     pub max_clients: usize,
 }
 
@@ -141,6 +163,9 @@ impl Default for GameClient {
         Self {
             game_process: None,
             active_clients: Vec::new(),
+            window_state_path: None,
+            last_window_state: None,
+            pending_window_restore_pids: HashSet::new(),
             max_clients: 3,
         }
     }
@@ -151,8 +176,15 @@ impl GameClient {
         Self {
             game_process: None,
             active_clients: Vec::new(),
+            window_state_path: None,
+            last_window_state: None,
+            pending_window_restore_pids: HashSet::new(),
             max_clients,
         }
+    }
+
+    pub fn set_window_state_path(&mut self, path: PathBuf) {
+        self.window_state_path = Some(path);
     }
 
     pub fn find_client_path(game_path: &PathBuf) -> Result<PathBuf> {
@@ -181,6 +213,7 @@ impl GameClient {
             ProcessHandle::spawn(&client_path).context("Falha ao iniciar o client.exe")?;
         info!("Processo principal iniciado com PID {}", process.pid);
 
+        self.pending_window_restore_pids.insert(process.pid);
         self.game_process = Some(process);
         Ok(())
     }
@@ -196,6 +229,7 @@ impl GameClient {
             ProcessHandle::spawn(&client_path).context("Falha ao iniciar client adicional")?;
 
         info!("Cliente adicional iniciado com PID {}", process.pid);
+        self.pending_window_restore_pids.insert(process.pid);
         self.active_clients.push(process);
         Ok(())
     }
@@ -203,7 +237,8 @@ impl GameClient {
     pub fn is_main_client_running(&mut self) -> bool {
         match &self.game_process {
             Some(process) if process.is_running() => true,
-            Some(_) => {
+            Some(process) => {
+                self.pending_window_restore_pids.remove(&process.pid);
                 self.game_process = None;
                 false
             }
@@ -212,12 +247,22 @@ impl GameClient {
     }
 
     pub fn update_additional_clients(&mut self) {
+        let closed_pids: Vec<u32> = self
+            .active_clients
+            .iter()
+            .filter(|client| !client.is_running())
+            .map(|client| client.pid)
+            .collect();
+        for pid in closed_pids {
+            self.pending_window_restore_pids.remove(&pid);
+        }
         self.active_clients.retain(|client| client.is_running());
     }
 
     pub fn terminate_all_processes(&mut self) {
         self.active_clients.clear();
         self.game_process = None;
+        self.pending_window_restore_pids.clear();
     }
 
     pub fn get_clients_count(&self) -> (bool, usize) {
@@ -227,6 +272,8 @@ impl GameClient {
     pub fn sync_client_state(&mut self) -> (bool, usize) {
         let has_main = self.is_main_client_running();
         self.update_additional_clients();
+        self.restore_pending_client_window_states();
+        self.remember_current_client_window_state();
         (has_main, self.active_clients.len())
     }
 
@@ -338,6 +385,103 @@ impl GameClient {
             .filter_map(client_window_from_hwnd)
             .collect()
     }
+
+    fn remember_current_client_window_state(&mut self) {
+        if self.window_state_path.is_none() {
+            return;
+        }
+
+        let Some(state) = self
+            .tracked_client_window_details()
+            .into_iter()
+            .find(|client_window| {
+                client_window.info.visible
+                    && !self
+                        .pending_window_restore_pids
+                        .contains(&client_window.info.pid)
+            })
+            .and_then(|client_window| client_window_state_from_hwnd(client_window.hwnd))
+        else {
+            return;
+        };
+
+        self.save_client_window_state(state);
+    }
+
+    fn restore_pending_client_window_states(&mut self) {
+        if self.pending_window_restore_pids.is_empty() {
+            return;
+        }
+
+        let Some(state) = self.load_client_window_state() else {
+            self.pending_window_restore_pids.clear();
+            return;
+        };
+
+        let mut restored_pids = Vec::new();
+        for client_window in self.tracked_client_window_details() {
+            if !self
+                .pending_window_restore_pids
+                .contains(&client_window.info.pid)
+            {
+                continue;
+            }
+
+            if apply_client_window_state(client_window.hwnd, state) {
+                restored_pids.push(client_window.info.pid);
+            }
+        }
+
+        for pid in restored_pids {
+            self.pending_window_restore_pids.remove(&pid);
+        }
+    }
+
+    fn load_client_window_state(&mut self) -> Option<ClientWindowState> {
+        if let Some(state) = self.last_window_state.filter(|state| state.is_valid()) {
+            return Some(state);
+        }
+
+        let path = self.window_state_path.as_ref()?;
+        let data = fs::read(path).ok()?;
+        let state = serde_json::from_slice::<ClientWindowState>(&data).ok()?;
+        if !state.is_valid() {
+            return None;
+        }
+
+        self.last_window_state = Some(state);
+        Some(state)
+    }
+
+    fn save_client_window_state(&mut self, state: ClientWindowState) {
+        if !state.is_valid() || self.last_window_state == Some(state) {
+            return;
+        }
+
+        let Some(path) = self.window_state_path.as_ref() else {
+            return;
+        };
+
+        if let Some(parent) = path.parent() {
+            if let Err(error) = fs::create_dir_all(parent) {
+                info!("Nao foi possivel criar diretorio de estado da janela: {error}");
+                return;
+            }
+        }
+
+        match serde_json::to_vec_pretty(&state) {
+            Ok(data) => {
+                if let Err(error) = fs::write(path, data) {
+                    info!("Nao foi possivel salvar tamanho da janela do cliente: {error}");
+                } else {
+                    self.last_window_state = Some(state);
+                }
+            }
+            Err(error) => {
+                info!("Nao foi possivel serializar tamanho da janela do cliente: {error}");
+            }
+        }
+    }
 }
 
 fn client_window_from_hwnd(hwnd: HWND) -> Option<ClientWindow> {
@@ -381,6 +525,59 @@ fn window_title(hwnd: HWND) -> Option<String> {
         .trim()
         .to_string();
     if title.is_empty() { None } else { Some(title) }
+}
+
+fn client_window_state_from_hwnd(hwnd: HWND) -> Option<ClientWindowState> {
+    unsafe {
+        if IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 {
+            return None;
+        }
+
+        let mut placement: WINDOWPLACEMENT = std::mem::zeroed();
+        placement.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
+        if GetWindowPlacement(hwnd, &mut placement) == 0 {
+            return None;
+        }
+
+        let rect = placement.rcNormalPosition;
+        let state = ClientWindowState {
+            left: rect.left,
+            top: rect.top,
+            width: rect.right - rect.left,
+            height: rect.bottom - rect.top,
+            maximized: placement.showCmd == SW_SHOWMAXIMIZED as u32,
+        };
+
+        state.is_valid().then_some(state)
+    }
+}
+
+fn apply_client_window_state(hwnd: HWND, state: ClientWindowState) -> bool {
+    if !state.is_valid() {
+        return false;
+    }
+
+    unsafe {
+        let mut placement: WINDOWPLACEMENT = std::mem::zeroed();
+        placement.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
+        if GetWindowPlacement(hwnd, &mut placement) == 0 {
+            return false;
+        }
+
+        placement.rcNormalPosition = RECT {
+            left: state.left,
+            top: state.top,
+            right: state.left + state.width,
+            bottom: state.top + state.height,
+        };
+        placement.showCmd = if state.maximized {
+            SW_SHOWMAXIMIZED as u32
+        } else {
+            SW_SHOWNORMAL as u32
+        };
+
+        SetWindowPlacement(hwnd, &placement) != 0
+    }
 }
 
 pub fn character_name_from_window_title(title: &str, pid: u32) -> String {

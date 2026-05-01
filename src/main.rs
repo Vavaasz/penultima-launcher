@@ -92,7 +92,8 @@ impl Default for GameLauncher {
         info!("Clientes disponíveis: {}", available_clients.len());
 
         // Criar GameClient com número máximo específico de clientes
-        let game_client = GameClient::default();
+        let mut game_client = GameClient::default();
+        game_client.set_window_state_path(state_path.join("client-window-state.json"));
 
         // Carregar configurações do usuário
         let cache_manager =
