@@ -15,6 +15,7 @@ impl ClientVersionManager {
             state_path: PathBuf::new(),
             download_path: download_path.clone(),
             game_path: game_path.clone(),
+            otclient_path: PathBuf::new(),
         };
 
         let client_paths = app_dirs.find_client_paths();

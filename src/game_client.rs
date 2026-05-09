@@ -44,11 +44,11 @@ struct ProcessHandle {
 }
 
 impl ProcessHandle {
-    fn spawn(client_path: &Path) -> Result<Self> {
-        let file_wide = wide_null(client_path.as_os_str());
-        let workdir = client_path
+    fn spawn(executable_path: &Path) -> Result<Self> {
+        let file_wide = wide_null(executable_path.as_os_str());
+        let workdir = executable_path
             .parent()
-            .ok_or_else(|| anyhow!("client.exe sem diretorio pai"))?;
+            .ok_or_else(|| anyhow!("executavel sem diretorio pai"))?;
         let workdir_wide = wide_null(workdir.as_os_str());
         let mut exec_info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
         exec_info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
@@ -60,7 +60,7 @@ impl ProcessHandle {
 
         unsafe {
             if ShellExecuteExW(&mut exec_info) == 0 {
-                return Err(anyhow!("ShellExecuteExW falhou ao iniciar o client.exe"));
+                return Err(anyhow!("ShellExecuteExW falhou ao iniciar o executavel"));
             }
         }
 
@@ -74,7 +74,7 @@ impl ProcessHandle {
             unsafe {
                 let _ = CloseHandle(handle);
             }
-            return Err(anyhow!("Nao foi possivel obter o PID do client.exe"));
+            return Err(anyhow!("Nao foi possivel obter o PID do processo"));
         }
 
         Ok(Self { pid, handle })
@@ -229,6 +229,24 @@ impl GameClient {
             ProcessHandle::spawn(&client_path).context("Falha ao iniciar client adicional")?;
 
         info!("Cliente adicional iniciado com PID {}", process.pid);
+        self.pending_window_restore_pids.insert(process.pid);
+        self.active_clients.push(process);
+        Ok(())
+    }
+
+    pub fn launch_otclient_launcher(&mut self, launcher_path: &PathBuf) -> Result<()> {
+        self.update_additional_clients();
+        if self.active_clients.len() >= self.max_clients {
+            return Err(anyhow!("Numero maximo de clients atingido"));
+        }
+
+        if !launcher_path.exists() {
+            return Err(anyhow!("OTCLauncher.exe nao encontrado"));
+        }
+
+        let process =
+            ProcessHandle::spawn(launcher_path).context("Falha ao iniciar OTClient")?;
+        info!("OTClient launcher iniciado com PID {}", process.pid);
         self.pending_window_restore_pids.insert(process.pid);
         self.active_clients.push(process);
         Ok(())

@@ -345,40 +345,85 @@ impl GameLauncher {
                 }
             });
         } else {
-            ui.horizontal(|ui| {
-                ui.add_space(indent);
-                if ui
-                    .add_sized(
-                        [button_width, button_height],
-                        egui::Button::new(egui::RichText::new("▶ JOGAR").size(22.0).color(
-                            if ui.ui_contains_pointer() {
-                                egui::Color32::BLACK
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.add_space(indent);
+                    if ui
+                        .add_sized(
+                            [button_width, button_height],
+                            egui::Button::new(
+                                egui::RichText::new("Play Client 15.23").size(18.0).color(
+                                    if ui.ui_contains_pointer() {
+                                        egui::Color32::BLACK
+                                    } else {
+                                        egui::Color32::WHITE
+                                    },
+                                ),
+                            )
+                            .fill(if ui.ui_contains_pointer() {
+                                egui::Color32::from_rgb(
+                                    ACCENT_PRIMARY_RGB.0,
+                                    ACCENT_PRIMARY_RGB.1,
+                                    ACCENT_PRIMARY_RGB.2,
+                                )
                             } else {
-                                egui::Color32::WHITE
-                            },
-                        ))
-                        .fill(if ui.ui_contains_pointer() {
-                            egui::Color32::from_rgb(
-                                ACCENT_PRIMARY_RGB.0,
-                                ACCENT_PRIMARY_RGB.1,
-                                ACCENT_PRIMARY_RGB.2,
-                            )
-                        } else {
-                            egui::Color32::from_rgb(
-                                ACCENT_SECONDARY_RGB.0,
-                                ACCENT_SECONDARY_RGB.1,
-                                ACCENT_SECONDARY_RGB.2,
-                            )
-                        })
-                        .corner_radius(10.0)
-                        .stroke(egui::Stroke::NONE),
-                    )
-                    .clicked()
-                {
-                    if let Err(error) = self.launch_game(ctx) {
-                        self.status = format!("Erro ao iniciar o jogo: {}", error);
+                                egui::Color32::from_rgb(
+                                    ACCENT_SECONDARY_RGB.0,
+                                    ACCENT_SECONDARY_RGB.1,
+                                    ACCENT_SECONDARY_RGB.2,
+                                )
+                            })
+                            .corner_radius(10.0)
+                            .stroke(egui::Stroke::NONE),
+                        )
+                        .clicked()
+                    {
+                        if let Err(error) = self.launch_game(ctx) {
+                            self.status = format!("Erro ao iniciar o jogo: {}", error);
+                        }
                     }
-                }
+                });
+
+                ui.add_space(8.0);
+
+                ui.horizontal(|ui| {
+                    ui.add_space(indent);
+                    if ui
+                        .add_sized(
+                            [button_width, button_height],
+                            egui::Button::new(
+                                egui::RichText::new("Play OTClient").size(18.0).color(
+                                    if ui.ui_contains_pointer() {
+                                        egui::Color32::BLACK
+                                    } else {
+                                        egui::Color32::WHITE
+                                    },
+                                ),
+                            )
+                            .fill(if ui.ui_contains_pointer() {
+                                egui::Color32::from_rgb(
+                                    ACCENT_PRIMARY_RGB.0,
+                                    ACCENT_PRIMARY_RGB.1,
+                                    ACCENT_PRIMARY_RGB.2,
+                                )
+                            } else {
+                                egui::Color32::from_rgb(
+                                    ACCENT_SECONDARY_RGB.0,
+                                    ACCENT_SECONDARY_RGB.1,
+                                    ACCENT_SECONDARY_RGB.2,
+                                )
+                            })
+                            .corner_radius(10.0)
+                            .stroke(egui::Stroke::NONE),
+                        )
+                        .clicked()
+                    {
+                        if let Err(error) = self.prepare_otclient(ctx) {
+                            self.status = format!("Erro ao preparar OTClient: {}", error);
+                            self.is_processing = false;
+                        }
+                    }
+                });
             });
         }
     }

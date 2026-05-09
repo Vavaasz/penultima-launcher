@@ -23,6 +23,7 @@ mod instance_manager;
 mod launcher_update;
 mod logger;
 mod message_system;
+mod otclient;
 mod tray_manager;
 mod ui_components;
 mod updates;
@@ -45,6 +46,7 @@ struct GameLauncher {
     progress: f32,
     download_path: PathBuf,
     game_path: PathBuf,
+    otclient_path: PathBuf,
     state_path: PathBuf,
     current_version: Option<String>,
     update_sender: Option<mpsc::UnboundedSender<()>>,
@@ -108,6 +110,7 @@ impl Default for GameLauncher {
             progress: 0.0,
             download_path: download_path.clone(),
             game_path: game_path.clone(),
+            otclient_path: app_dirs.otclient_path.clone(),
             state_path: state_path.clone(),
             current_version: None,
             update_sender: None,
@@ -507,6 +510,56 @@ impl GameLauncher {
         }
     }
 
+    fn prepare_otclient(&mut self, ctx: &egui::Context) -> Result<()> {
+        let sender = self
+            .message_sender
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Canal de mensagens do launcher indisponivel"))?;
+
+        self.status = "Preparando OTClient Redemption...".to_string();
+        self.is_processing = true;
+        self.progress = 0.0;
+        self.temp_message_time = None;
+        self.is_alert_message = false;
+        ctx.request_repaint();
+
+        let install_path = self.otclient_path.clone();
+        tokio::spawn(async move {
+            match otclient::ensure_otcrp_launcher(install_path, sender.clone()).await {
+                Ok(launcher_path) => {
+                    let _ = sender.send(LauncherMessage::LaunchOtClient(launcher_path));
+                }
+                Err(error) => {
+                    let _ = sender.send(LauncherMessage::Error(format!(
+                        "Erro ao preparar OTClient: {:#}",
+                        error
+                    )));
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    fn launch_otclient_executable(
+        &mut self,
+        ctx: &egui::Context,
+        launcher_path: PathBuf,
+    ) -> Result<()> {
+        self.game_client.launch_otclient_launcher(&launcher_path)?;
+        self.status = "OTClient em execucao".to_string();
+        self.is_processing = false;
+        self.temp_message_time = Some(Instant::now());
+        self.is_alert_message = false;
+        self.needs_repaint.store(true, Ordering::SeqCst);
+
+        if self.auto_hide {
+            self.hide_launcher_to_tray(ctx);
+        }
+
+        Ok(())
+    }
+
     pub fn start_launcher_update(&mut self, ctx: &egui::Context) {
         let (tx, rx) = mpsc::unbounded_channel();
         self.message_receiver = Some(rx);
@@ -605,9 +658,13 @@ impl GameLauncher {
 
             // 1. Drenar canal de mensagens (necessário para detectar comandos)
             let mut should_restart_for_launcher_update = false;
+            let mut pending_otclient_launch = None;
             if let Some(receiver) = &mut self.message_receiver {
                 while let Ok(message) = receiver.try_recv() {
                     match message {
+                        LauncherMessage::LaunchOtClient(path) => {
+                            pending_otclient_launch = Some(path);
+                        }
                         LauncherMessage::PingResult(ping) => {
                             self.server_ping = ping;
                             self.last_ping_check = Some(Instant::now());
@@ -640,6 +697,14 @@ impl GameLauncher {
                         _ => {} // Outras mensagens processadas quando visível
                     }
                 }
+            }
+            if let Some(path) = pending_otclient_launch {
+                if let Err(error) = self.launch_otclient_executable(ctx, path) {
+                    self.status = format!("Erro ao iniciar OTClient: {}", error);
+                    self.is_processing = false;
+                }
+                ctx.request_repaint();
+                return;
             }
             if should_restart_for_launcher_update {
                 self.restart_launcher_for_update(ctx);
@@ -970,6 +1035,12 @@ impl GameLauncher {
                         LauncherMessage::LaunchGame => {
                             if let Err(e) = self.launch_game(ctx) {
                                 self.status = format!("Erro ao iniciar o jogo: {}", e);
+                            }
+                        }
+                        LauncherMessage::LaunchOtClient(path) => {
+                            if let Err(e) = self.launch_otclient_executable(ctx, path) {
+                                self.status = format!("Erro ao iniciar OTClient: {}", e);
+                                self.is_processing = false;
                             }
                         }
                         LauncherMessage::CheckForUpdates => {

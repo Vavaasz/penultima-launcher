@@ -1,7 +1,10 @@
 // Mensagens que podem ser enviadas ao launcher
+use std::path::PathBuf;
+
 #[derive(Debug)]
 pub enum LauncherMessage {
     LaunchGame,
+    LaunchOtClient(PathBuf),
     #[allow(dead_code)]
     CheckForUpdates,
     UpdateAvailable(String),

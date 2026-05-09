@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 /// Estrutura para gerenciar os diretórios da aplicação
 pub struct AppDirs {
+    pub otclient_path: PathBuf,
     pub base_dir: PathBuf,      // Diretório base único
     pub state_path: PathBuf,    // Estado interno do launcher
     pub download_path: PathBuf, // Subdiretório para downloads
@@ -40,6 +41,7 @@ impl AppDirs {
         let state_path = base_dir.join("state");
         let download_path = base_dir.join("downloads");
         let game_path = base_dir.join("game");
+        let otclient_path = base_dir.join("otclient");
 
         fs::create_dir_all(&base_dir).context("Não foi possível criar diretório base")?;
         fs::create_dir_all(&state_path)
@@ -47,12 +49,15 @@ impl AppDirs {
         fs::create_dir_all(&download_path)
             .context("Não foi possível criar diretório de download")?;
         fs::create_dir_all(&game_path).context("Não foi possível criar diretório do jogo")?;
+        fs::create_dir_all(&otclient_path)
+            .context("Não foi possível criar diretório do OTClient")?;
 
         Ok(Self {
             base_dir,
             state_path,
             download_path,
             game_path,
+            otclient_path,
         })
     }
 

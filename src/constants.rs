@@ -40,6 +40,9 @@ pub const DOWNLOADS_METADATA_URL: &str =
 pub const CLIENT_GITHUB_ARCHIVE_URL: &str =
     "https://ultimaotserv.online/downloads/Penultima-Client-Feed.zip";
 
+pub const OTCRP_LAUNCHER_BOOTSTRAP_URL: &str =
+    "https://otcrp.com/otc-updates/beta/launcher-bootstrap.zip";
+
 /// Manifesto principal do cliente
 pub const CLIENT_PACKAGE_MANIFEST_URL: &str =
     "https://ultimaotserv.online/downloads/client-feed/package.json";
