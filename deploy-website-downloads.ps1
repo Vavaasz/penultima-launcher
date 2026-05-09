@@ -62,6 +62,8 @@ if (-not $launcherVersionMatch) {
   throw "Could not read launcher version from $launcherCargoToml"
 }
 $launcherVersion = $launcherVersionMatch.Matches[0].Groups[1].Value
+$launcherVersionedZipName = "Penultima-Launcher-$launcherVersion.zip"
+$launcherVersionedZipPath = Join-Path $downloadsRoot $launcherVersionedZipName
 
 if (-not $SkipClient) {
   if (-not (Test-Path -LiteralPath $publishWebsiteClientAssetsScript)) {
@@ -100,6 +102,7 @@ if (-not $SkipLauncher) {
   }
 
   & $publishLauncherScript @launcherPublishArgs
+  Copy-Item -LiteralPath $launcherZipPath -Destination $launcherVersionedZipPath -Force
 }
 
 $launcherExePath = Join-Path $launcherReleaseDir "penultima-launcher.exe"
@@ -121,9 +124,9 @@ $launcherMetadata = $null
 if (Test-Path $launcherZipPath) {
   $launcherMetadata = [ordered]@{
     version = $launcherVersion
-    zip = "downloads/Penultima-Launcher.zip"
-    sha256 = (Get-FileHash $launcherZipPath -Algorithm SHA256).Hash
-    size = (Get-Item $launcherZipPath).Length
+    zip = "downloads/$launcherVersionedZipName"
+    sha256 = (Get-FileHash $launcherVersionedZipPath -Algorithm SHA256).Hash
+    size = (Get-Item $launcherVersionedZipPath).Length
     signed = $launcherSigned
     signature_status = $launcherSignatureStatus
   }
