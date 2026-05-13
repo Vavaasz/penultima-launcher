@@ -8,7 +8,7 @@ use std::time::Instant;
 use zip::ZipArchive;
 
 use crate::constants::{
-    HTTP_DOWNLOAD_TIMEOUT, OTCRP_LAUNCHER_BOOTSTRAP_URL, OTCRP_LAUNCHER_DOWNLOAD_PAGE_URL,
+    HTTP_DOWNLOAD_TIMEOUT, OTCRP_LAUNCHER_DOWNLOAD_PAGE_URL, OTCRP_PARTNER_LAUNCHER_ZIP_URL,
 };
 use crate::message_system::LauncherMessage;
 use crate::tokio::sync::mpsc;
@@ -34,8 +34,8 @@ pub async fn ensure_otcrp_launcher(
     )?;
     send_message(&message_sender, LauncherMessage::DownloadProgress(0.0))?;
 
-    let archive_path = install_path.join("launcher-bootstrap.zip.download");
-    download_bootstrap(&archive_path, &message_sender).await?;
+    let archive_path = install_path.join("launcher.zip.download");
+    download_partner_launcher_zip(&archive_path, &message_sender).await?;
 
     send_message(
         &message_sender,
@@ -43,20 +43,20 @@ pub async fn ensure_otcrp_launcher(
     )?;
     send_message(&message_sender, LauncherMessage::DownloadProgress(0.85))?;
 
-    extract_bootstrap(&archive_path, &install_path)?;
+    extract_partner_launcher_zip(&archive_path, &install_path)?;
     if archive_path.exists() {
         fs::remove_file(&archive_path).ok();
     }
 
     if !launcher_path.exists() {
         return Err(anyhow!(
-            "OTCLauncher.exe nao foi encontrado apos extrair o bootstrap"
+            "OTCLauncher.exe nao foi encontrado apos extrair o Partner Launcher"
         ));
     }
 
     info!(
-        "Partner Launcher OTCRP pronto: bootstrap={}",
-        OTCRP_LAUNCHER_BOOTSTRAP_URL
+        "Partner Launcher OTCRP pronto: zip={}",
+        OTCRP_PARTNER_LAUNCHER_ZIP_URL
     );
 
     send_message(&message_sender, LauncherMessage::DownloadProgress(1.0))?;
@@ -69,7 +69,7 @@ fn has_required_otclient_files(install_path: &Path) -> bool {
         .all(|file_name| install_path.join(file_name).exists())
 }
 
-async fn download_bootstrap(
+async fn download_partner_launcher_zip(
     archive_path: &Path,
     message_sender: &mpsc::UnboundedSender<LauncherMessage>,
 ) -> Result<()> {
@@ -79,20 +79,20 @@ async fn download_bootstrap(
         .context("Falha ao inicializar cliente HTTP do OTClient")?;
 
     let response = client
-        .get(OTCRP_LAUNCHER_BOOTSTRAP_URL)
+        .get(OTCRP_PARTNER_LAUNCHER_ZIP_URL)
         .send()
         .await
         .with_context(|| {
             format!(
-                "Falha ao baixar bootstrap do Partner Launcher em {}. Pagina manual: {}",
-                OTCRP_LAUNCHER_BOOTSTRAP_URL, OTCRP_LAUNCHER_DOWNLOAD_PAGE_URL
+                "Falha ao baixar ZIP do Partner Launcher em {}. Pagina manual: {}",
+                OTCRP_PARTNER_LAUNCHER_ZIP_URL, OTCRP_LAUNCHER_DOWNLOAD_PAGE_URL
             )
         })?
         .error_for_status()
         .with_context(|| {
             format!(
-                "Bootstrap do Partner Launcher retornou erro HTTP em {}. Pagina manual: {}",
-                OTCRP_LAUNCHER_BOOTSTRAP_URL, OTCRP_LAUNCHER_DOWNLOAD_PAGE_URL
+                "ZIP do Partner Launcher retornou erro HTTP em {}. Pagina manual: {}",
+                OTCRP_PARTNER_LAUNCHER_ZIP_URL, OTCRP_LAUNCHER_DOWNLOAD_PAGE_URL
             )
         })?;
 
@@ -106,7 +106,7 @@ async fn download_bootstrap(
     );
 
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.context("Falha ao ler dados do bootstrap do OTClient")?;
+        let chunk = chunk.context("Falha ao ler dados do Partner Launcher")?;
         file.write_all(&chunk)?;
         downloaded_bytes += chunk.len() as u64;
 
@@ -120,7 +120,7 @@ async fn download_bootstrap(
     file.flush()?;
 
     info!(
-        "Bootstrap Partner Launcher baixado: {} bytes em {:.1}s",
+        "Partner Launcher ZIP baixado: {} bytes em {:.1}s",
         downloaded_bytes,
         started_at.elapsed().as_secs_f32()
     );
@@ -128,15 +128,15 @@ async fn download_bootstrap(
     Ok(())
 }
 
-fn extract_bootstrap(archive_path: &Path, install_path: &Path) -> Result<()> {
+fn extract_partner_launcher_zip(archive_path: &Path, install_path: &Path) -> Result<()> {
     let archive_file = File::open(archive_path)
         .with_context(|| format!("Falha ao abrir {}", archive_path.display()))?;
-    let mut archive = ZipArchive::new(archive_file).context("Bootstrap OTClient ZIP invalido")?;
+    let mut archive = ZipArchive::new(archive_file).context("Partner Launcher ZIP invalido")?;
 
     for index in 0..archive.len() {
         let mut entry = archive
             .by_index(index)
-            .with_context(|| format!("Falha ao ler entrada {} do bootstrap OTClient", index))?;
+            .with_context(|| format!("Falha ao ler entrada {} do Partner Launcher", index))?;
 
         let Some(relative_path) = safe_zip_path(entry.name()) else {
             continue;

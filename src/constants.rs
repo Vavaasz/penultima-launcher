@@ -46,8 +46,9 @@ pub const OTCRP_PARTNER_SLUG: &str = "penultima";
 /// Pagina de download do Partner Launcher OTCRP do Penultima
 pub const OTCRP_LAUNCHER_DOWNLOAD_PAGE_URL: &str = "http://otcrp.com/downloads/penultima";
 
-/// Bootstrap do Partner Launcher OTCRP do Penultima
-pub const OTCRP_LAUNCHER_BOOTSTRAP_URL: &str = "http://otcrp.com/downloads/penultima/launcher.zip";
+/// ZIP do Partner Launcher OTCRP do Penultima
+pub const OTCRP_PARTNER_LAUNCHER_ZIP_URL: &str =
+    "http://otcrp.com/downloads/penultima/launcher.zip";
 
 /// Manifesto principal do cliente
 pub const CLIENT_PACKAGE_MANIFEST_URL: &str =
