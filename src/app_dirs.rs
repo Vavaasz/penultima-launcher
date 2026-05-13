@@ -41,7 +41,7 @@ impl AppDirs {
         let state_path = base_dir.join("state");
         let download_path = base_dir.join("downloads");
         let game_path = base_dir.join("game");
-        let otclient_path = base_dir.join("otclient").join(OTCRP_PARTNER_SLUG);
+        let otclient_path = base_dir.join("otclient");
 
         fs::create_dir_all(&base_dir).context("Não foi possível criar diretório base")?;
         fs::create_dir_all(&state_path)

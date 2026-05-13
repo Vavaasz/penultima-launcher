@@ -54,18 +54,16 @@ pub async fn ensure_otcrp_launcher(
 
     let launcher_path = install_path.join(OTCLIENT_LAUNCHER_EXE);
     let has_required_files = has_required_otclient_files(&install_path);
-    if has_required_files && partner_state_matches(&install_path) {
+    if has_required_files {
+        if !partner_state_matches(&install_path) {
+            write_partner_state(&install_path)?;
+        }
         return Ok(launcher_path);
     }
 
-    let status = if has_required_files {
-        "Atualizando Partner Launcher Penultima..."
-    } else {
-        "Baixando Partner Launcher Penultima..."
-    };
     send_message(
         &message_sender,
-        LauncherMessage::SetStatus(status.to_string()),
+        LauncherMessage::SetStatus("Baixando Partner Launcher Penultima...".to_string()),
     )?;
     send_message(&message_sender, LauncherMessage::DownloadProgress(0.0))?;
 
