@@ -1,18 +1,49 @@
 use anyhow::{Context, Result, anyhow};
 use futures_util::StreamExt;
 use log::info;
+use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use zip::ZipArchive;
 
-use crate::constants::{HTTP_DOWNLOAD_TIMEOUT, OTCRP_LAUNCHER_BOOTSTRAP_URL};
+use crate::constants::{
+    HTTP_DOWNLOAD_TIMEOUT, OTCRP_LAUNCHER_BOOTSTRAP_URL, OTCRP_LAUNCHER_DOWNLOAD_PAGE_URL,
+    OTCRP_LAUNCHER_MANIFEST_URL, OTCRP_LAUNCHER_UPDATE_CHANNEL, OTCRP_PARTNER_SLUG,
+};
 use crate::message_system::LauncherMessage;
 use crate::tokio::sync::mpsc;
 
 const OTCLIENT_LAUNCHER_EXE: &str = "OTCLauncher.exe";
 const OTCLIENT_REQUIRED_FILES: &[&str] = &[OTCLIENT_LAUNCHER_EXE, "cacert.pem"];
+const PARTNER_STATE_FILE_NAME: &str = "penultima-partner-launcher.json";
+
+#[derive(Debug, Deserialize, Serialize)]
+struct PartnerLauncherState {
+    partner_slug: String,
+    update_channel: String,
+    bootstrap_url: String,
+    manifest_url: String,
+}
+
+impl PartnerLauncherState {
+    fn current() -> Self {
+        Self {
+            partner_slug: OTCRP_PARTNER_SLUG.to_string(),
+            update_channel: OTCRP_LAUNCHER_UPDATE_CHANNEL.to_string(),
+            bootstrap_url: OTCRP_LAUNCHER_BOOTSTRAP_URL.to_string(),
+            manifest_url: OTCRP_LAUNCHER_MANIFEST_URL.to_string(),
+        }
+    }
+
+    fn matches_current(&self) -> bool {
+        self.partner_slug == OTCRP_PARTNER_SLUG
+            && self.update_channel == OTCRP_LAUNCHER_UPDATE_CHANNEL
+            && self.bootstrap_url == OTCRP_LAUNCHER_BOOTSTRAP_URL
+            && self.manifest_url == OTCRP_LAUNCHER_MANIFEST_URL
+    }
+}
 
 pub async fn ensure_otcrp_launcher(
     install_path: PathBuf,
@@ -22,16 +53,19 @@ pub async fn ensure_otcrp_launcher(
         .with_context(|| format!("Falha ao criar {}", install_path.display()))?;
 
     let launcher_path = install_path.join(OTCLIENT_LAUNCHER_EXE);
-    if OTCLIENT_REQUIRED_FILES
-        .iter()
-        .all(|file_name| install_path.join(file_name).exists())
-    {
+    let has_required_files = has_required_otclient_files(&install_path);
+    if has_required_files && partner_state_matches(&install_path) {
         return Ok(launcher_path);
     }
 
+    let status = if has_required_files {
+        "Atualizando Partner Launcher Penultima..."
+    } else {
+        "Baixando Partner Launcher Penultima..."
+    };
     send_message(
         &message_sender,
-        LauncherMessage::SetStatus("Baixando OTClient Redemption...".to_string()),
+        LauncherMessage::SetStatus(status.to_string()),
     )?;
     send_message(&message_sender, LauncherMessage::DownloadProgress(0.0))?;
 
@@ -40,7 +74,7 @@ pub async fn ensure_otcrp_launcher(
 
     send_message(
         &message_sender,
-        LauncherMessage::SetStatus("Instalando OTClient Redemption...".to_string()),
+        LauncherMessage::SetStatus("Instalando Partner Launcher Penultima...".to_string()),
     )?;
     send_message(&message_sender, LauncherMessage::DownloadProgress(0.85))?;
 
@@ -55,8 +89,45 @@ pub async fn ensure_otcrp_launcher(
         ));
     }
 
+    write_partner_state(&install_path)?;
+    info!(
+        "Partner Launcher OTCRP pronto: slug={}, channel={}, manifest={}",
+        OTCRP_PARTNER_SLUG, OTCRP_LAUNCHER_UPDATE_CHANNEL, OTCRP_LAUNCHER_MANIFEST_URL
+    );
+
     send_message(&message_sender, LauncherMessage::DownloadProgress(1.0))?;
     Ok(launcher_path)
+}
+
+fn has_required_otclient_files(install_path: &Path) -> bool {
+    OTCLIENT_REQUIRED_FILES
+        .iter()
+        .all(|file_name| install_path.join(file_name).exists())
+}
+
+fn partner_state_matches(install_path: &Path) -> bool {
+    let state_path = install_path.join(PARTNER_STATE_FILE_NAME);
+    let Ok(raw_state) = fs::read_to_string(&state_path) else {
+        return false;
+    };
+
+    let Ok(state) = serde_json::from_str::<PartnerLauncherState>(&raw_state) else {
+        return false;
+    };
+
+    state.matches_current()
+}
+
+fn write_partner_state(install_path: &Path) -> Result<()> {
+    let state_path = install_path.join(PARTNER_STATE_FILE_NAME);
+    let state = PartnerLauncherState::current();
+    let data = serde_json::to_vec_pretty(&state)
+        .context("Falha ao serializar estado do Partner Launcher")?;
+
+    fs::write(&state_path, data)
+        .with_context(|| format!("Falha ao gravar {}", state_path.display()))?;
+
+    Ok(())
 }
 
 async fn download_bootstrap(
@@ -72,9 +143,19 @@ async fn download_bootstrap(
         .get(OTCRP_LAUNCHER_BOOTSTRAP_URL)
         .send()
         .await
-        .context("Falha ao baixar bootstrap do OTClient")?
+        .with_context(|| {
+            format!(
+                "Falha ao baixar bootstrap do Partner Launcher em {}. Pagina manual: {}",
+                OTCRP_LAUNCHER_BOOTSTRAP_URL, OTCRP_LAUNCHER_DOWNLOAD_PAGE_URL
+            )
+        })?
         .error_for_status()
-        .context("Bootstrap do OTClient retornou erro HTTP")?;
+        .with_context(|| {
+            format!(
+                "Bootstrap do Partner Launcher retornou erro HTTP em {}. Pagina manual: {}",
+                OTCRP_LAUNCHER_BOOTSTRAP_URL, OTCRP_LAUNCHER_DOWNLOAD_PAGE_URL
+            )
+        })?;
 
     let total_bytes = response.content_length();
     let started_at = Instant::now();
@@ -100,7 +181,7 @@ async fn download_bootstrap(
     file.flush()?;
 
     info!(
-        "Bootstrap OTClient baixado: {} bytes em {:.1}s",
+        "Bootstrap Partner Launcher baixado: {} bytes em {:.1}s",
         downloaded_bytes,
         started_at.elapsed().as_secs_f32()
     );
