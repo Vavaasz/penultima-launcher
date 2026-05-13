@@ -190,6 +190,10 @@ impl LauncherUpdateManager {
             return Ok(false);
         }
 
+        if !install_when_ambiguous {
+            return Ok(false);
+        }
+
         let Some(expected_exe_hash) = release.exe_sha256.as_deref() else {
             return Ok(false);
         };

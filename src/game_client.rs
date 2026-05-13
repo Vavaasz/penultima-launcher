@@ -23,6 +23,7 @@ use windows::Win32::Foundation::{CloseHandle, HANDLE, STILL_ACTIVE, WAIT_TIMEOUT
 use windows::Win32::System::Threading::{GetExitCodeProcess, GetProcessId, WaitForSingleObject};
 
 const CLIENT_WINDOW_TITLE_PREFIX: &str = "Tibia - ";
+const OTCLIENT_LAUNCHER_EXE: &str = "OTCLauncher.exe";
 
 pub struct WindowState {
     pub visible: bool,
@@ -244,8 +245,19 @@ impl GameClient {
             return Err(anyhow!("OTCLauncher.exe nao encontrado"));
         }
 
-        let process =
-            ProcessHandle::spawn(launcher_path).context("Falha ao iniciar OTClient")?;
+        let executable_name = launcher_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if !executable_name.eq_ignore_ascii_case(OTCLIENT_LAUNCHER_EXE) {
+            return Err(anyhow!(
+                "OTClient deve ser iniciado por {}, nao por {}",
+                OTCLIENT_LAUNCHER_EXE,
+                launcher_path.display()
+            ));
+        }
+
+        let process = ProcessHandle::spawn(launcher_path).context("Falha ao iniciar OTClient")?;
         info!("OTClient launcher iniciado com PID {}", process.pid);
         self.pending_window_restore_pids.insert(process.pid);
         self.active_clients.push(process);
