@@ -43,19 +43,11 @@ pub const CLIENT_GITHUB_ARCHIVE_URL: &str =
 /// Slug do Partner Launcher OTCRP usado pelo Penultima
 pub const OTCRP_PARTNER_SLUG: &str = "penultima";
 
-/// Canal fixo do Partner Launcher OTCRP usado pelo Penultima
-pub const OTCRP_LAUNCHER_UPDATE_CHANNEL: &str = "partner-penultima";
-
 /// Pagina de download do Partner Launcher OTCRP do Penultima
-pub const OTCRP_LAUNCHER_DOWNLOAD_PAGE_URL: &str = "https://otcrp.com/downloads/penultima";
+pub const OTCRP_LAUNCHER_DOWNLOAD_PAGE_URL: &str = "http://otcrp.com/downloads/penultima";
 
 /// Bootstrap do Partner Launcher OTCRP do Penultima
-pub const OTCRP_LAUNCHER_BOOTSTRAP_URL: &str =
-    "https://otcrp.com/downloads/penultima/launcher-bootstrap.zip";
-
-/// Manifesto do Partner Launcher OTCRP do Penultima
-pub const OTCRP_LAUNCHER_MANIFEST_URL: &str =
-    "https://otcrp.com/otc-updates/partner-penultima/manifest.json";
+pub const OTCRP_LAUNCHER_BOOTSTRAP_URL: &str = "http://otcrp.com/downloads/penultima/launcher.zip";
 
 /// Manifesto principal do cliente
 pub const CLIENT_PACKAGE_MANIFEST_URL: &str =

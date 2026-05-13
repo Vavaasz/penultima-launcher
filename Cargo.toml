@@ -1,6 +1,6 @@
 [package]
 name = "penultima-launcher"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 
 # Configuração para recursos do Windows
@@ -8,7 +8,7 @@ edition = "2024"
 OriginalFilename = "penultima-launcher.exe"
 FileDescription = "Penultima Launcher"
 ProductName = "Penultima Launcher"
-ProductVersion = "0.1.6"
+ProductVersion = "0.1.7"
 LegalCopyright = "Copyright 2025"
 
 [profile.dev]
