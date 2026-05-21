@@ -302,9 +302,8 @@ impl GameLauncher {
                     .add_sized(
                         [button_width, button_height],
                         egui::Button::new(
-                            egui::RichText::new("Abrir Outro Cliente")
-                                .size(15.0)
-                                .color(if can_launch_additional {
+                            egui::RichText::new("Abrir Outro Cliente").size(15.0).color(
+                                if can_launch_additional {
                                     if ui.ui_contains_pointer() {
                                         egui::Color32::BLACK
                                     } else {
@@ -312,8 +311,9 @@ impl GameLauncher {
                                     }
                                 } else {
                                     egui::Color32::GRAY
-                                }),
-                            )
+                                },
+                            ),
+                        )
                         .fill(if can_launch_additional {
                             if ui.ui_contains_pointer() {
                                 egui::Color32::from_rgb(
@@ -347,19 +347,17 @@ impl GameLauncher {
                 if ui
                     .add_sized(
                         [button_width, button_height],
-                        egui::Button::new(
-                            egui::RichText::new("Play OTClient")
-                                .size(15.0)
-                                .color(if can_launch_additional {
-                                    if ui.ui_contains_pointer() {
-                                        egui::Color32::BLACK
-                                    } else {
-                                        egui::Color32::WHITE
-                                    }
+                        egui::Button::new(egui::RichText::new("Play OTClient").size(15.0).color(
+                            if can_launch_additional {
+                                if ui.ui_contains_pointer() {
+                                    egui::Color32::BLACK
                                 } else {
-                                    egui::Color32::GRAY
-                                }),
-                        )
+                                    egui::Color32::WHITE
+                                }
+                            } else {
+                                egui::Color32::GRAY
+                            },
+                        ))
                         .fill(if can_launch_additional {
                             if ui.ui_contains_pointer() {
                                 egui::Color32::from_rgb(
@@ -589,15 +587,7 @@ impl GameLauncher {
                     )
                     .clicked()
                 {
-                    if has_clients {
-                        self.status =
-                            "Feche todos os clientes antes de atualizar o launcher".to_string();
-                        self.temp_message_time = Some(std::time::Instant::now());
-                        self.is_alert_message = true;
-                        ctx.request_repaint();
-                    } else {
-                        self.start_launcher_update(ctx);
-                    }
+                    self.start_launcher_update(ctx);
                 }
             });
         }
