@@ -288,25 +288,23 @@ impl GameLauncher {
         let available_width = ui.available_width();
         let indent = (available_width - button_width) / 2.0;
 
-        let is_game_running = self.is_game_running();
-        let (_, has_additional_clients) = self.game_client.sync_client_state();
-        let has_additional_clients = has_additional_clients > 0;
+        let (has_main_client, additional_count) = self.game_client.sync_client_state();
+        let has_additional_clients = additional_count > 0;
+        let has_any_client = has_main_client || has_additional_clients;
+        let can_launch_additional = additional_count < self.game_client.max_clients;
 
         if self.is_processing {
-        } else if is_game_running || has_additional_clients {
+        } else if has_any_client {
             ui.horizontal(|ui| {
                 ui.add_space(indent);
-                let (_, additional_count) = self.game_client.sync_client_state();
-                let max_clients = self.game_client.max_clients;
-                let can_launch = additional_count < max_clients;
 
                 if ui
                     .add_sized(
                         [button_width, button_height],
                         egui::Button::new(
-                            egui::RichText::new("▶ Abrir Outro Cliente")
+                            egui::RichText::new("Abrir Outro Cliente")
                                 .size(15.0)
-                                .color(if can_launch {
+                                .color(if can_launch_additional {
                                     if ui.ui_contains_pointer() {
                                         egui::Color32::BLACK
                                     } else {
@@ -315,8 +313,8 @@ impl GameLauncher {
                                 } else {
                                     egui::Color32::GRAY
                                 }),
-                        )
-                        .fill(if can_launch {
+                            )
+                        .fill(if can_launch_additional {
                             if ui.ui_contains_pointer() {
                                 egui::Color32::from_rgb(
                                     ACCENT_PRIMARY_RGB.0,
@@ -337,10 +335,57 @@ impl GameLauncher {
                         .stroke(egui::Stroke::NONE),
                     )
                     .clicked()
-                    && can_launch
+                    && can_launch_additional
                 {
                     if let Err(error) = self.launch_client() {
                         self.status = format!("Erro ao iniciar o cliente: {}", error);
+                    }
+                }
+
+                ui.add_space(10.0);
+
+                if ui
+                    .add_sized(
+                        [button_width, button_height],
+                        egui::Button::new(
+                            egui::RichText::new("Play OTClient")
+                                .size(15.0)
+                                .color(if can_launch_additional {
+                                    if ui.ui_contains_pointer() {
+                                        egui::Color32::BLACK
+                                    } else {
+                                        egui::Color32::WHITE
+                                    }
+                                } else {
+                                    egui::Color32::GRAY
+                                }),
+                        )
+                        .fill(if can_launch_additional {
+                            if ui.ui_contains_pointer() {
+                                egui::Color32::from_rgb(
+                                    ACCENT_PRIMARY_RGB.0,
+                                    ACCENT_PRIMARY_RGB.1,
+                                    ACCENT_PRIMARY_RGB.2,
+                                )
+                            } else {
+                                egui::Color32::from_rgb(
+                                    ACCENT_SECONDARY_RGB.0,
+                                    ACCENT_SECONDARY_RGB.1,
+                                    ACCENT_SECONDARY_RGB.2,
+                                )
+                            }
+                        } else {
+                            egui::Color32::from_rgb(150, 150, 150)
+                        })
+                        .corner_radius(10.0)
+                        .stroke(egui::Stroke::NONE),
+                    )
+                    .clicked()
+                    && can_launch_additional
+                {
+                    if let Err(error) = self.prepare_otclient(ctx) {
+                        self.status = format!("Erro ao preparar OTClient: {}", error);
+                        self.is_processing = false;
                     }
                 }
             });
