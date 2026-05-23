@@ -350,17 +350,9 @@ impl UpdateManager {
             return false;
         }
 
-        let client_missing = !self.game_path.join("bin").join("client.exe").exists();
-        let total_download_bytes = files_to_update
-            .iter()
-            .map(|file| file.packedsize.unwrap_or_default())
-            .sum::<u64>();
+        let _ = (force, has_local_sync_state);
 
-        force
-            || client_missing
-            || !has_local_sync_state
-            || files_to_update.len() >= BULK_ARCHIVE_FILE_THRESHOLD
-            || total_download_bytes >= BULK_ARCHIVE_BYTE_THRESHOLD
+        false
     }
 
     fn load_local_manifest(&self) -> Result<Option<PackageManifest>> {
@@ -1348,7 +1340,7 @@ mod tests {
     }
 
     #[test]
-    fn archive_install_is_used_when_launcher_state_is_missing() {
+    fn public_feed_updates_do_not_use_archive_install() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -1373,7 +1365,7 @@ mod tests {
             bootstrap_only: false,
         }];
 
-        assert!(manager.should_use_archive_install(&files, false, false));
+        assert!(!manager.should_use_archive_install(&files, false, false));
 
         let _ = fs::remove_dir_all(root);
     }
