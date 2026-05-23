@@ -478,11 +478,21 @@ impl GameLauncher {
         button_height: f32,
     ) {
         let available_height = ui.available_height();
-        ui.add_space(available_height - button_height - 1.0);
+        let help_text_height = 20.0;
+        ui.add_space((available_height - button_height - help_text_height - 1.0).max(0.0));
 
         let (has_main, additional_count) = self.game_client.sync_client_state();
         let has_clients = has_main || additional_count > 0;
         if !self.is_processing {
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    egui::RichText::new("In case of crashes, click \"Force Update\"")
+                        .size(12.0)
+                        .color(egui::Color32::from_rgb(190, 190, 190)),
+                );
+            });
+            ui.add_space(4.0);
+
             ui.horizontal_centered(|ui| {
                 if ui
                     .add_sized(
