@@ -23,5 +23,7 @@ pub enum LauncherMessage {
     WebsiteStatusError(String),
     BoostedPreviewLoaded(BoostedPreviewKind, BoostedPreviewData),
     BoostedPreviewError(BoostedPreviewKind, String, String),
+    OfferPreviewLoaded(BoostedPreviewData),
+    OfferPreviewError(String, String),
     RestartLauncherForUpdate,
 }

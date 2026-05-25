@@ -13,7 +13,9 @@ use crate::constants::{
     PING_GOOD_THRESHOLD, STARTUP_SPLASH_DURATION, SURFACE_RGB, WEBSITE_BASE_URL,
 };
 use crate::message_system::LauncherMessage;
-use crate::website_status::{EventSummary, OfferSummary};
+use crate::website_status::{EventSummary, OfferPreview, OfferSummary};
+
+const TOP_STATUS_CARD_HEIGHT: f32 = 248.0;
 
 fn panel_fill(alpha: u8) -> egui::Color32 {
     egui::Color32::from_rgba_unmultiplied(SURFACE_RGB.0, SURFACE_RGB.1, SURFACE_RGB.2, alpha)
@@ -81,6 +83,15 @@ fn small_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
 }
 
 fn render_card(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
+    render_card_with_min_height(ui, title, 0.0, add_contents);
+}
+
+fn render_card_with_min_height(
+    ui: &mut egui::Ui,
+    title: &str,
+    min_content_height: f32,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
     egui::Frame::new()
         .fill(panel_fill(205))
         .corner_radius(8.0)
@@ -97,9 +108,49 @@ fn render_card(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut eg
                     .color(egui::Color32::from_rgb(237, 204, 126)),
             );
             ui.add_space(8.0);
+            if min_content_height > 0.0 {
+                ui.set_min_height(min_content_height);
+            }
             add_contents(ui);
             ui.add_space(2.0);
         });
+}
+
+fn render_card_with_fixed_height(
+    ui: &mut egui::Ui,
+    title: &str,
+    height: f32,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+        ui.set_width(width);
+        ui.set_height(height);
+
+        egui::Frame::new()
+            .fill(panel_fill(205))
+            .corner_radius(8.0)
+            .stroke(egui::Stroke::new(
+                1.0,
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 36),
+            ))
+            .inner_margin(egui::Margin::symmetric(12, 12))
+            .show(ui, |ui| {
+                ui.set_min_width((width - 24.0).max(0.0));
+                ui.set_min_height((height - 24.0).max(0.0));
+                ui.label(
+                    egui::RichText::new(title)
+                        .size(13.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(237, 204, 126)),
+                );
+                ui.add_space(8.0);
+                add_contents(ui);
+                ui.add_space(2.0);
+            });
+    });
 }
 
 fn value_row(ui: &mut egui::Ui, label: &str, value: Option<&str>) {
@@ -121,34 +172,62 @@ fn value_row(ui: &mut egui::Ui, label: &str, value: Option<&str>) {
     });
 }
 
-fn render_event_list(ui: &mut egui::Ui, events: &[EventSummary], empty_text: &str) {
-    if events.is_empty() {
+fn render_event_summary_tile(
+    ui: &mut egui::Ui,
+    label: &str,
+    event: Option<&EventSummary>,
+    empty_text: &str,
+) {
+    ui.vertical(|ui| {
+        ui.set_min_height(70.0);
         ui.label(
-            egui::RichText::new(empty_text)
-                .size(13.0)
-                .color(egui::Color32::from_rgb(195, 200, 210)),
+            egui::RichText::new(label)
+                .size(12.0)
+                .strong()
+                .color(egui::Color32::from_rgb(237, 204, 126)),
         );
-        return;
-    }
+        ui.add_space(4.0);
 
-    for event in events.iter().take(4) {
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.label(
-                    egui::RichText::new(&event.name)
-                        .size(13.0)
-                        .strong()
-                        .color(egui::Color32::from_rgb(225, 230, 238)),
-                );
-                ui.label(
-                    egui::RichText::new(&event.window)
-                        .size(12.0)
-                        .color(egui::Color32::from_rgb(170, 180, 195)),
-                );
-            });
-        });
-        ui.add_space(6.0);
-    }
+        if let Some(event) = event {
+            ui.label(
+                egui::RichText::new(&event.name)
+                    .size(13.0)
+                    .strong()
+                    .color(egui::Color32::from_rgb(225, 230, 238)),
+            );
+            ui.label(
+                egui::RichText::new(&event.window)
+                    .size(11.5)
+                    .color(egui::Color32::from_rgb(170, 180, 195)),
+            );
+        } else {
+            ui.label(
+                egui::RichText::new(empty_text)
+                    .size(12.0)
+                    .color(egui::Color32::from_rgb(195, 200, 210)),
+            );
+        }
+    });
+}
+
+fn preview_tile_rect(ui: &mut egui::Ui, size: f32) -> (egui::Rect, egui::Response) {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    ui.painter().rect_filled(
+        rect,
+        8.0,
+        egui::Color32::from_rgba_unmultiplied(0, 0, 0, 105),
+    );
+    ui.painter().rect_stroke(
+        rect,
+        8.0,
+        egui::Stroke::new(
+            1.0,
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 34),
+        ),
+        egui::StrokeKind::Inside,
+    );
+
+    (rect, response)
 }
 
 pub fn render_all_components(
@@ -186,8 +265,17 @@ pub fn render_all_components(
 
                 ui.vertical(|ui| {
                     let content_width = (available_size.x - 370.0).max(560.0);
-                    ui.set_width(content_width);
-                    launcher.render_site_content_impl(ui, ctx);
+                    let content_height = (available_size.y - 36.0).max(360.0);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(content_width, content_height),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_width(content_width);
+                            ui.set_height(content_height);
+                            ui.set_max_height(content_height);
+                            launcher.render_site_content_impl(ui, ctx);
+                        },
+                    );
                 });
 
                 ui.add_space(22.0);
@@ -425,13 +513,14 @@ impl GameLauncher {
 
         ui.add_space(12.0);
 
+        let tab_height = ui.available_height().max(260.0);
         match self.selected_tab {
-            LauncherTab::Dashboard => self.render_dashboard_tab_impl(ui),
-            LauncherTab::News => self.render_news_tab_impl(ui),
+            LauncherTab::Dashboard => self.render_dashboard_tab_impl(ui, tab_height),
+            LauncherTab::News => self.render_news_tab_impl(ui, tab_height),
         }
     }
 
-    fn render_dashboard_tab_impl(&mut self, ui: &mut egui::Ui) {
+    fn render_dashboard_tab_impl(&mut self, ui: &mut egui::Ui, max_height: f32) {
         if let Some(error) = &self.website_status.error {
             ui.label(
                 egui::RichText::new(format!("Website data error: {}", error))
@@ -443,6 +532,10 @@ impl GameLauncher {
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
+            .max_height(max_height)
+            .scroll_bar_visibility(
+                egui::containers::scroll_area::ScrollBarVisibility::AlwaysVisible,
+            )
             .show(ui, |ui| {
                 ui.columns(2, |columns| {
                     self.render_boosts_card_impl(&mut columns[0]);
@@ -474,7 +567,7 @@ impl GameLauncher {
             });
     }
 
-    fn render_news_tab_impl(&mut self, ui: &mut egui::Ui) {
+    fn render_news_tab_impl(&mut self, ui: &mut egui::Ui, max_height: f32) {
         ui.horizontal(|ui| {
             ui.label(
                 egui::RichText::new("Latest changelog entries")
@@ -518,6 +611,10 @@ impl GameLauncher {
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
+            .max_height((max_height - 52.0).max(180.0))
+            .scroll_bar_visibility(
+                egui::containers::scroll_area::ScrollBarVisibility::AlwaysVisible,
+            )
             .show(ui, |ui| {
                 for entry in &self.website_status.changelogs {
                     render_card(
@@ -544,7 +641,7 @@ impl GameLauncher {
         let creature_name = self.website_status.boosted_creature.clone();
         let boss_name = self.website_status.boosted_boss.clone();
 
-        render_card(ui, "Today", |ui| {
+        render_card_with_fixed_height(ui, "Today", TOP_STATUS_CARD_HEIGHT, |ui| {
             value_row(ui, "Online", online_players.as_deref());
             ui.add_space(8.0);
 
@@ -574,21 +671,7 @@ impl GameLauncher {
     ) {
         ui.vertical_centered(|ui| {
             let preview_size = egui::vec2(82.0, 82.0);
-            let (rect, _) = ui.allocate_exact_size(preview_size, egui::Sense::hover());
-            ui.painter().rect_filled(
-                rect,
-                8.0,
-                egui::Color32::from_rgba_unmultiplied(0, 0, 0, 96),
-            );
-            ui.painter().rect_stroke(
-                rect,
-                8.0,
-                egui::Stroke::new(
-                    1.0,
-                    egui::Color32::from_rgba_unmultiplied(255, 255, 255, 28),
-                ),
-                egui::StrokeKind::Inside,
-            );
+            let (rect, _) = preview_tile_rect(ui, preview_size.x);
 
             if let Some(frame) = self.current_boosted_preview_frame(kind, ui.ctx()) {
                 let texture_size = frame.texture.size_vec2();
@@ -636,18 +719,11 @@ impl GameLauncher {
     }
 
     fn render_events_card_impl(&mut self, ui: &mut egui::Ui) {
-        let active_events = self.website_status.active_events.clone();
-        let upcoming_events = self.website_status.upcoming_events.clone();
+        let active_event = self.website_status.active_events.first().cloned();
+        let upcoming_event = self.website_status.upcoming_events.first().cloned();
 
-        render_card(ui, "Events", |ui| {
+        render_card_with_fixed_height(ui, "Events", TOP_STATUS_CARD_HEIGHT, |ui| {
             ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("Active")
-                        .size(13.0)
-                        .strong()
-                        .color(egui::Color32::from_rgb(237, 204, 126)),
-                );
-
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.link("Calendar").clicked() {
                         self.open_external_url(EVENT_CALENDAR_URL);
@@ -655,16 +731,21 @@ impl GameLauncher {
                 });
             });
 
-            render_event_list(ui, &active_events, "No active event now.");
-
-            ui.add_space(10.0);
-            ui.label(
-                egui::RichText::new("Upcoming")
-                    .size(13.0)
-                    .strong()
-                    .color(egui::Color32::from_rgb(237, 204, 126)),
-            );
-            render_event_list(ui, &upcoming_events, "No upcoming event found.");
+            ui.add_space(2.0);
+            ui.columns(2, |columns| {
+                render_event_summary_tile(
+                    &mut columns[0],
+                    "Active",
+                    active_event.as_ref(),
+                    "No active event.",
+                );
+                render_event_summary_tile(
+                    &mut columns[1],
+                    "Next upcoming",
+                    upcoming_event.as_ref(),
+                    "No upcoming event.",
+                );
+            });
         });
     }
 
@@ -700,8 +781,13 @@ impl GameLauncher {
                     );
                 }
 
+                if !offer.previews.is_empty() {
+                    ui.add_space(8.0);
+                    self.render_offer_previews_impl(ui, &offer.previews);
+                }
+
                 ui.add_space(8.0);
-                for (label, value) in &offer.facts {
+                for (label, value) in offer.facts.iter().take(4) {
                     value_row(ui, label, Some(value));
                 }
             } else {
@@ -716,6 +802,95 @@ impl GameLauncher {
                 );
             }
         });
+    }
+
+    fn render_offer_previews_impl(&mut self, ui: &mut egui::Ui, previews: &[OfferPreview]) {
+        let spacing = 8.0;
+        let large_previews = previews
+            .iter()
+            .filter(|preview| preview.tile_size > 64.0)
+            .collect::<Vec<_>>();
+        let item_previews = previews
+            .iter()
+            .filter(|preview| preview.tile_size <= 64.0)
+            .collect::<Vec<_>>();
+
+        if !large_previews.is_empty() {
+            self.render_offer_preview_grid_impl(ui, &large_previews, spacing, 3);
+        }
+
+        if !large_previews.is_empty() && !item_previews.is_empty() {
+            ui.add_space(8.0);
+        }
+
+        if !item_previews.is_empty() {
+            self.render_offer_preview_grid_impl(ui, &item_previews, spacing, 5);
+        }
+    }
+
+    fn render_offer_preview_grid_impl(
+        &mut self,
+        ui: &mut egui::Ui,
+        previews: &[&OfferPreview],
+        spacing: f32,
+        max_columns: usize,
+    ) {
+        let tile_size = previews
+            .first()
+            .map(|preview| preview.tile_size)
+            .unwrap_or(64.0);
+        let columns = ((ui.available_width() + spacing) / (tile_size + spacing))
+            .floor()
+            .clamp(1.0, max_columns as f32) as usize;
+
+        egui::Grid::new(ui.next_auto_id())
+            .num_columns(columns)
+            .spacing(egui::vec2(spacing, spacing))
+            .show(ui, |ui| {
+                for (index, preview) in previews.iter().enumerate() {
+                    self.render_offer_preview_tile_impl(ui, preview);
+                    if (index + 1) % columns == 0 {
+                        ui.end_row();
+                    }
+                }
+            });
+    }
+
+    fn render_offer_preview_tile_impl(&mut self, ui: &mut egui::Ui, preview: &OfferPreview) {
+        let tile_size = preview.tile_size;
+        let (rect, response) = preview_tile_rect(ui, tile_size);
+
+        if let Some(frame) = self.offer_preview_frame(&preview.url, ui.ctx()) {
+            let texture_size = frame.texture.size_vec2();
+            let display_size = preview.display_size.min(tile_size);
+            let scale = (display_size / texture_size.x).min(display_size / texture_size.y);
+            let image_size = texture_size * scale;
+            let image_rect = egui::Rect::from_center_size(rect.center(), image_size);
+            ui.painter().image(
+                frame.texture.id(),
+                image_rect,
+                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+            ui.ctx().request_repaint_after(Duration::from_millis(80));
+        } else {
+            let text = if self.offer_preview_is_loading(&preview.url) {
+                "Loading"
+            } else if self.offer_preview_error(&preview.url).is_some() {
+                "Preview"
+            } else {
+                "Waiting"
+            };
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                text,
+                egui::FontId::proportional(10.5),
+                egui::Color32::from_rgb(170, 180, 195),
+            );
+        }
+
+        response.on_hover_text(&preview.title);
     }
 
     fn render_investor_card_impl(&mut self, ui: &mut egui::Ui) {

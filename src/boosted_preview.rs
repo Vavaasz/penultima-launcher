@@ -3,8 +3,11 @@ use image::AnimationDecoder;
 use image::codecs::gif::GifDecoder;
 use reqwest::Client;
 use std::io::{BufReader, Cursor};
+use std::sync::OnceLock;
 
 use crate::constants::HTTP_REQUEST_TIMEOUT;
+
+static PREVIEW_CLIENT: OnceLock<Client> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BoostedPreviewKind {
@@ -26,11 +29,15 @@ pub struct BoostedPreviewData {
 }
 
 pub async fn fetch_boosted_preview(url: String) -> Result<BoostedPreviewData> {
-    let client = Client::builder()
-        .timeout(HTTP_REQUEST_TIMEOUT)
-        .user_agent("PenultimaLauncher/boosted-preview")
-        .build()
-        .context("failed to build boosted preview client")?;
+    let client = PREVIEW_CLIENT
+        .get_or_init(|| {
+            Client::builder()
+                .timeout(HTTP_REQUEST_TIMEOUT)
+                .user_agent("PenultimaLauncher/boosted-preview")
+                .build()
+                .expect("preview HTTP client should build")
+        })
+        .clone();
 
     let bytes = client
         .get(&url)

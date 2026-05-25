@@ -6,7 +6,9 @@ use clap::Parser;
 use eframe::egui;
 use image;
 use log::info;
+use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
 use std::fs::{self};
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -109,6 +111,9 @@ struct GameLauncher {
     boosted_boss_preview_loading_url: Option<String>,
     boosted_creature_preview_error: Option<String>,
     boosted_boss_preview_error: Option<String>,
+    offer_preview_textures: HashMap<String, BoostedPreviewTexture>,
+    offer_preview_loading_urls: HashSet<String>,
+    offer_preview_errors: HashMap<String, String>,
     selected_tab: LauncherTab,
     was_hidden: bool, // Controla transição de visibilidade para otimizar CPU quando minimizado
     clients_hidden_to_tray: bool,
@@ -189,6 +194,9 @@ impl Default for GameLauncher {
             boosted_boss_preview_loading_url: None,
             boosted_creature_preview_error: None,
             boosted_boss_preview_error: None,
+            offer_preview_textures: HashMap::new(),
+            offer_preview_loading_urls: HashSet::new(),
+            offer_preview_errors: HashMap::new(),
             selected_tab: LauncherTab::Dashboard,
             was_hidden: false,
             clients_hidden_to_tray: false,
@@ -316,16 +324,62 @@ impl GameLauncher {
         }
     }
 
-    fn apply_boosted_preview(
-        &mut self,
-        ctx: &egui::Context,
-        kind: BoostedPreviewKind,
-        preview: BoostedPreviewData,
-    ) {
-        if self.boosted_preview_loading_url(kind) != Some(preview.url.as_str()) {
+    fn refresh_offer_previews(&mut self) {
+        let urls = self
+            .website_status
+            .battle_pass
+            .iter()
+            .chain(self.website_status.pack_week.iter())
+            .flat_map(|offer| offer.previews.iter().map(|preview| preview.url.clone()))
+            .collect::<Vec<_>>();
+
+        let active_urls = urls.iter().cloned().collect::<HashSet<_>>();
+        self.offer_preview_textures
+            .retain(|url, _| active_urls.contains(url));
+        self.offer_preview_errors
+            .retain(|url, _| active_urls.contains(url));
+        self.offer_preview_loading_urls
+            .retain(|url| active_urls.contains(url));
+
+        for url in urls {
+            self.queue_offer_preview(url);
+        }
+    }
+
+    fn queue_offer_preview(&mut self, url: String) {
+        if self.offer_preview_textures.contains_key(&url)
+            || self.offer_preview_loading_urls.contains(&url)
+        {
             return;
         }
 
+        self.offer_preview_loading_urls.insert(url.clone());
+        self.offer_preview_errors.remove(&url);
+
+        if let Some(message_sender) = &self.message_sender {
+            let sender = message_sender.clone();
+            tokio::spawn(async move {
+                match boosted_preview::fetch_boosted_preview(url.clone()).await {
+                    Ok(preview) => {
+                        let _ = sender.send(LauncherMessage::OfferPreviewLoaded(preview));
+                    }
+                    Err(error) => {
+                        let _ = sender.send(LauncherMessage::OfferPreviewError(
+                            url,
+                            format!("{:#}", error),
+                        ));
+                    }
+                }
+            });
+        }
+    }
+
+    fn texture_from_preview_data(
+        ctx: &egui::Context,
+        texture_name_prefix: &str,
+        preview: BoostedPreviewData,
+    ) -> Result<BoostedPreviewTexture, String> {
+        let url = preview.url;
         let mut total_delay_ms = 0_u32;
         let frames = preview
             .frames
@@ -335,7 +389,7 @@ impl GameLauncher {
                 let color_image =
                     egui::ColorImage::from_rgba_unmultiplied(frame.size, frame.rgba.as_slice());
                 let texture = ctx.load_texture(
-                    format!("boosted-preview-{:?}-{}", kind, index),
+                    format!("{}-{}", texture_name_prefix, index),
                     color_image,
                     egui::TextureOptions::NEAREST,
                 );
@@ -349,15 +403,43 @@ impl GameLauncher {
             .collect::<Vec<_>>();
 
         if frames.is_empty() {
-            self.set_boosted_preview_error(kind, Some("preview had no frames".to_string()));
-            self.set_boosted_preview_loading(kind, None);
+            return Err("preview had no frames".to_string());
+        }
+
+        Ok(BoostedPreviewTexture {
+            url,
+            frames,
+            total_delay_ms: total_delay_ms.max(60),
+        })
+    }
+
+    fn preview_texture_key(url: &str) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        url.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn apply_boosted_preview(
+        &mut self,
+        ctx: &egui::Context,
+        kind: BoostedPreviewKind,
+        preview: BoostedPreviewData,
+    ) {
+        if self.boosted_preview_loading_url(kind) != Some(preview.url.as_str()) {
             return;
         }
 
-        let texture = BoostedPreviewTexture {
-            url: preview.url,
-            frames,
-            total_delay_ms: total_delay_ms.max(60),
+        let texture = match Self::texture_from_preview_data(
+            ctx,
+            &format!("boosted-preview-{:?}", kind),
+            preview,
+        ) {
+            Ok(texture) => texture,
+            Err(error) => {
+                self.set_boosted_preview_error(kind, Some(error));
+                self.set_boosted_preview_loading(kind, None);
+                return;
+            }
         };
 
         match kind {
@@ -367,6 +449,30 @@ impl GameLauncher {
 
         self.set_boosted_preview_loading(kind, None);
         self.set_boosted_preview_error(kind, None);
+    }
+
+    fn apply_offer_preview(&mut self, ctx: &egui::Context, preview: BoostedPreviewData) {
+        if !self.offer_preview_loading_urls.remove(&preview.url) {
+            return;
+        }
+
+        let url = preview.url.clone();
+        let texture_prefix = format!("offer-preview-{:x}", Self::preview_texture_key(&url));
+        match Self::texture_from_preview_data(ctx, &texture_prefix, preview) {
+            Ok(texture) => {
+                self.offer_preview_textures.insert(url.clone(), texture);
+                self.offer_preview_errors.remove(&url);
+            }
+            Err(error) => {
+                self.offer_preview_errors.insert(url, error);
+            }
+        }
+    }
+
+    fn apply_offer_preview_error(&mut self, url: String, error: String) {
+        if self.offer_preview_loading_urls.remove(&url) {
+            self.offer_preview_errors.insert(url, error);
+        }
     }
 
     fn apply_boosted_preview_error(
@@ -437,6 +543,21 @@ impl GameLauncher {
             BoostedPreviewKind::Boss => self.boosted_boss_preview.as_ref(),
         }?;
 
+        Self::current_preview_frame(preview, ctx)
+    }
+
+    fn offer_preview_frame(
+        &self,
+        url: &str,
+        ctx: &egui::Context,
+    ) -> Option<&BoostedPreviewTextureFrame> {
+        Self::current_preview_frame(self.offer_preview_textures.get(url)?, ctx)
+    }
+
+    fn current_preview_frame<'a>(
+        preview: &'a BoostedPreviewTexture,
+        ctx: &egui::Context,
+    ) -> Option<&'a BoostedPreviewTextureFrame> {
         if preview.frames.is_empty() {
             return None;
         }
@@ -453,6 +574,14 @@ impl GameLauncher {
         }
 
         preview.frames.first()
+    }
+
+    fn offer_preview_is_loading(&self, url: &str) -> bool {
+        self.offer_preview_loading_urls.contains(url)
+    }
+
+    fn offer_preview_error(&self, url: &str) -> Option<&String> {
+        self.offer_preview_errors.get(url)
     }
 
     fn boosted_preview_is_loading(&self, kind: BoostedPreviewKind) -> bool {
@@ -1194,6 +1323,14 @@ impl GameLauncher {
                                 }
                             }
                         }
+                        LauncherMessage::OfferPreviewLoaded(preview) => {
+                            self.offer_preview_loading_urls.remove(&preview.url);
+                        }
+                        LauncherMessage::OfferPreviewError(url, error) => {
+                            if self.offer_preview_loading_urls.remove(&url) {
+                                self.offer_preview_errors.insert(url, error);
+                            }
+                        }
                         LauncherMessage::SetStatus(status) => {
                             self.status = status;
                         }
@@ -1546,6 +1683,7 @@ impl GameLauncher {
         }
         self.refresh_website_status();
         self.refresh_boosted_previews();
+        self.refresh_offer_previews();
 
         if let Some(receiver) = &mut self.message_receiver {
             // Coletar todas as mensagens disponíveis em um vetor
@@ -1623,6 +1761,7 @@ impl GameLauncher {
                             self.website_status = status;
                             self.website_status_loading = false;
                             self.refresh_boosted_previews();
+                            self.refresh_offer_previews();
                         }
                         LauncherMessage::WebsiteStatusError(error) => {
                             self.apply_website_status_error(error);
@@ -1632,6 +1771,12 @@ impl GameLauncher {
                         }
                         LauncherMessage::BoostedPreviewError(kind, url, error) => {
                             self.apply_boosted_preview_error(kind, url, error);
+                        }
+                        LauncherMessage::OfferPreviewLoaded(preview) => {
+                            self.apply_offer_preview(ctx, preview);
+                        }
+                        LauncherMessage::OfferPreviewError(url, error) => {
+                            self.apply_offer_preview_error(url, error);
                         }
                         LauncherMessage::RestartLauncherForUpdate => {
                             self.restart_launcher_for_update(ctx);

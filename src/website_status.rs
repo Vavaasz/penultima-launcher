@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::{Local, NaiveDateTime};
+use futures_util::future::join_all;
 use regex::Regex;
 use reqwest::Client;
 
@@ -36,6 +37,15 @@ pub struct OfferSummary {
     pub title: String,
     pub subtitle: Option<String>,
     pub facts: Vec<(String, String)>,
+    pub previews: Vec<OfferPreview>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OfferPreview {
+    pub title: String,
+    pub url: String,
+    pub tile_size: f32,
+    pub display_size: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -61,15 +71,26 @@ pub async fn fetch_website_status() -> Result<WebsiteStatus> {
         .build()
         .context("failed to build website client")?;
 
-    let home = fetch_text(&client, WEBSITE_BASE_URL)
-        .await
-        .context("failed to fetch website home")?;
+    let urls = [
+        WEBSITE_BASE_URL,
+        EVENT_CALENDAR_URL,
+        BATTLE_PASS_URL,
+        PACK_WEEK_URL,
+        INVESTMENT_URL,
+        CHANGELOG_URL,
+    ];
+    let results = join_all(urls.iter().map(|url| fetch_text(&client, url))).await;
+    let mut results = results.into_iter();
 
-    let event_html = fetch_text(&client, EVENT_CALENDAR_URL).await.ok();
-    let battle_pass_html = fetch_text(&client, BATTLE_PASS_URL).await.ok();
-    let pack_week_html = fetch_text(&client, PACK_WEEK_URL).await.ok();
-    let investment_html = fetch_text(&client, INVESTMENT_URL).await.ok();
-    let changelog_html = fetch_text(&client, CHANGELOG_URL).await.ok();
+    let home = results
+        .next()
+        .expect("home result exists")
+        .context("failed to fetch website home")?;
+    let event_html = optional_text_or_retry(&client, EVENT_CALENDAR_URL, results.next()).await;
+    let battle_pass_html = optional_text_or_retry(&client, BATTLE_PASS_URL, results.next()).await;
+    let pack_week_html = optional_text_or_retry(&client, PACK_WEEK_URL, results.next()).await;
+    let investment_html = optional_text_or_retry(&client, INVESTMENT_URL, results.next()).await;
+    let changelog_html = optional_text_or_retry(&client, CHANGELOG_URL, results.next()).await;
 
     let mut status = WebsiteStatus {
         online_players: parse_online_players(&home),
@@ -113,6 +134,17 @@ async fn fetch_text(client: &Client, url: &str) -> Result<String> {
         .error_for_status()?
         .text()
         .await?)
+}
+
+async fn optional_text_or_retry(
+    client: &Client,
+    url: &str,
+    result: Option<Result<String>>,
+) -> Option<String> {
+    match result {
+        Some(Ok(html)) => Some(html),
+        Some(Err(_)) | None => fetch_text(client, url).await.ok(),
+    }
 }
 
 fn parse_online_players(html: &str) -> Option<u32> {
@@ -207,6 +239,7 @@ fn parse_event_section(html: &str, heading: &str) -> Vec<EventSummary> {
 
 fn parse_battle_pass(html: &str) -> OfferSummary {
     let lines = visible_text_lines(html);
+    let offer_scope = offer_scope(html, "bpass-hero", "Boosted Creature");
     let facts = wanted_facts(
         &lines,
         &[
@@ -223,11 +256,13 @@ fn parse_battle_pass(html: &str) -> OfferSummary {
         title: parse_page_title(html).unwrap_or_else(|| "Battle Pass".to_string()),
         subtitle: first_line_containing(&lines, "24-day reward track"),
         facts,
+        previews: parse_offer_previews(&offer_scope, 8),
     }
 }
 
 fn parse_pack_week(html: &str) -> OfferSummary {
     let lines = visible_text_lines(html);
+    let offer_scope = offer_scope(html, "packweek-hero", "Vanquisher Package");
     let facts = wanted_facts(
         &lines,
         &[
@@ -242,7 +277,86 @@ fn parse_pack_week(html: &str) -> OfferSummary {
         title: parse_page_title(html).unwrap_or_else(|| "Package Week".to_string()),
         subtitle: first_line_containing(&lines, "Frozen Session"),
         facts,
+        previews: parse_offer_previews(&offer_scope, 6),
     }
+}
+
+fn offer_scope(html: &str, start_needle: &str, end_heading: &str) -> String {
+    let start = html.find(start_needle).unwrap_or(0);
+    let scoped = &html[start..];
+    let end_pattern = format!(r#"(?is)<h3>\s*{}\s*</h3>"#, regex::escape(end_heading));
+
+    if let Some(end) = Regex::new(&end_pattern)
+        .ok()
+        .and_then(|regex| regex.find(scoped))
+    {
+        scoped[..end.start()].to_string()
+    } else {
+        scoped.to_string()
+    }
+}
+
+fn parse_offer_previews(html: &str, limit: usize) -> Vec<OfferPreview> {
+    let sprite_re = Regex::new(
+        r#"(?is)<span[^>]*class=["'][^"']*penultima-sprite[^"']*["'][^>]*>\s*<img\s+([^>]+)>"#,
+    )
+    .expect("valid offer sprite regex");
+
+    let mut previews = Vec::new();
+
+    for captures in sprite_re.captures_iter(html) {
+        let attrs = &captures[1];
+        let Some(src) = capture_attr(attrs, "src") else {
+            continue;
+        };
+
+        if !src.contains("tools/sprite.php") {
+            continue;
+        }
+
+        let url = normalize_url(&decode_html_entities(&src));
+        if previews
+            .iter()
+            .any(|preview: &OfferPreview| preview.url == url)
+        {
+            continue;
+        }
+
+        let title = capture_attr(attrs, "title")
+            .or_else(|| capture_attr(attrs, "alt"))
+            .map(|value| clean_text(&decode_html_entities(&value)))
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "Reward".to_string());
+
+        let is_large_preview = url.contains("type=outfit");
+        let (tile_size, display_size) = if is_large_preview {
+            (128.0, 128.0)
+        } else {
+            (64.0, 64.0)
+        };
+
+        previews.push(OfferPreview {
+            title,
+            url,
+            tile_size,
+            display_size,
+        });
+
+        if previews.len() >= limit {
+            break;
+        }
+    }
+
+    previews
+}
+
+fn capture_attr(attrs: &str, attr_name: &str) -> Option<String> {
+    let pattern = format!(
+        r#"(?is)\b{}\s*=\s*["']([^"']+)["']"#,
+        regex::escape(attr_name)
+    );
+
+    capture_first(attrs, &pattern)
 }
 
 fn parse_investor(html: &str) -> Option<InvestorSummary> {
