@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow};
-use futures_util::StreamExt;
+use futures_util::{StreamExt, stream};
 use log::info;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -7,8 +7,6 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-#[cfg(windows)]
-use std::process::Command;
 
 use crate::client_version::ClientVersionManager;
 use crate::constants::{
@@ -23,6 +21,8 @@ use zip::ZipArchive;
 
 const BULK_ARCHIVE_FILE_THRESHOLD: usize = 1_500;
 const BULK_ARCHIVE_BYTE_THRESHOLD: u64 = 128 * 1024 * 1024;
+const MANIFEST_DOWNLOAD_CONCURRENCY: usize = 16;
+const MANIFEST_DOWNLOAD_PROGRESS_END: f32 = 0.98;
 const ARCHIVE_DOWNLOAD_PROGRESS_END: f32 = 0.82;
 const ARCHIVE_EXTRACTION_PROGRESS_END: f32 = 0.98;
 const STATUS_REPORT_INTERVAL: Duration = Duration::from_millis(250);
@@ -251,16 +251,8 @@ impl UpdateManager {
             self.install_from_archive(&download_client, &message_sender, &remote.package_manifest)
                 .await?;
         } else {
-            for (index, file) in files_to_update.iter().enumerate() {
-                self.download_manifest_file(
-                    &download_client,
-                    file,
-                    index + 1,
-                    files_to_update.len(),
-                    &message_sender,
-                )
+            self.download_manifest_files(&download_client, &files_to_update, &message_sender)
                 .await?;
-            }
         }
 
         self.persist_metadata(&remote)?;
@@ -350,9 +342,17 @@ impl UpdateManager {
             return false;
         }
 
-        let _ = (force, has_local_sync_state);
+        let client_missing = !self.game_path.join("bin").join("client.exe").exists();
+        let total_download_bytes = files_to_update
+            .iter()
+            .map(|file| file.packedsize.unwrap_or_default())
+            .sum::<u64>();
 
-        false
+        force
+            || client_missing
+            || !has_local_sync_state
+            || files_to_update.len() >= BULK_ARCHIVE_FILE_THRESHOLD
+            || total_download_bytes >= BULK_ARCHIVE_BYTE_THRESHOLD
     }
 
     fn load_local_manifest(&self) -> Result<Option<PackageManifest>> {
@@ -443,19 +443,72 @@ impl UpdateManager {
         Ok(false)
     }
 
+    async fn download_manifest_files(
+        &self,
+        http_client: &reqwest::Client,
+        files_to_update: &[PackageFile],
+        message_sender: &mpsc::UnboundedSender<LauncherMessage>,
+    ) -> Result<()> {
+        let total = files_to_update.len();
+        if total == 0 {
+            return Ok(());
+        }
+
+        send_message(
+            message_sender,
+            LauncherMessage::SetStatus(format!(
+                "Baixando arquivos do cliente em paralelo ({MANIFEST_DOWNLOAD_CONCURRENCY} conexoes)..."
+            )),
+        )?;
+
+        let started_at = Instant::now();
+        let mut completed = 0usize;
+        let mut last_report_at = Instant::now()
+            .checked_sub(STATUS_REPORT_INTERVAL)
+            .unwrap_or_else(Instant::now);
+        let mut downloads = stream::iter(files_to_update.iter().cloned().map(|file| async move {
+            let file_name = display_file_name(&file.localfile);
+            self.download_manifest_file(http_client, &file)
+                .await
+                .with_context(|| format!("Falha ao atualizar {}", file.localfile))?;
+            Ok::<String, anyhow::Error>(file_name)
+        }))
+        .buffer_unordered(MANIFEST_DOWNLOAD_CONCURRENCY);
+
+        while let Some(result) = downloads.next().await {
+            let file_name = result?;
+            completed += 1;
+
+            let should_report =
+                last_report_at.elapsed() >= STATUS_REPORT_INTERVAL || completed == total;
+            if should_report {
+                let elapsed_secs = started_at.elapsed().as_secs_f64().max(0.1);
+                let files_per_second = completed as f64 / elapsed_secs;
+                let progress = (completed as f32 / total as f32) * MANIFEST_DOWNLOAD_PROGRESS_END;
+
+                send_message(
+                    message_sender,
+                    LauncherMessage::SetStatus(format!(
+                        "Atualizando arquivos do cliente... {completed}/{total} ({files_per_second:.1} arquivos/s, ultimo: {file_name})"
+                    )),
+                )?;
+                send_message(
+                    message_sender,
+                    LauncherMessage::DownloadProgress(progress.min(MANIFEST_DOWNLOAD_PROGRESS_END)),
+                )?;
+                last_report_at = Instant::now();
+            }
+        }
+
+        Ok(())
+    }
+
     async fn download_manifest_file(
         &self,
         http_client: &reqwest::Client,
         file: &PackageFile,
-        index: usize,
-        total: usize,
-        message_sender: &mpsc::UnboundedSender<LauncherMessage>,
     ) -> Result<()> {
         let target_path = file.target_path(&self.game_path);
-        let file_name = target_path
-            .file_name()
-            .map(|value| value.to_string_lossy().to_string())
-            .unwrap_or_else(|| file.localfile.clone());
         let packed_temp_path = temporary_path(
             &target_path,
             if file.should_unpack() {
@@ -470,18 +523,6 @@ impl UpdateManager {
             fs::create_dir_all(parent)
                 .with_context(|| format!("Falha ao criar diretorio {}", parent.display()))?;
         }
-
-        send_message(
-            message_sender,
-            LauncherMessage::SetStatus(format!("Atualizando {}/{}: {}", index, total, file_name)),
-        )?;
-
-        let progress = if total == 0 {
-            1.0
-        } else {
-            ((index - 1) as f32 / total as f32).min(0.99)
-        };
-        send_message(message_sender, LauncherMessage::DownloadProgress(progress))?;
 
         download_to_path(http_client, &build_raw_url(&file.url), &packed_temp_path).await?;
 
@@ -562,10 +603,9 @@ impl UpdateManager {
         let extraction_result = extract_client_archive(
             &archive_path,
             &self.game_path,
-            &self.state_path,
             message_sender,
-            !self.game_path.join("bin").join("client.exe").exists(),
             &archive_preserved_bootstrap_paths(manifest, &self.game_path),
+            manifest,
         );
 
         if archive_path.exists() {
@@ -785,27 +825,35 @@ fn temporary_path(target_path: &Path, suffix: &str) -> PathBuf {
     target_path.with_file_name(format!("{file_name}.{suffix}.tmp"))
 }
 
+fn display_file_name(path: &str) -> String {
+    path.replace('\\', "/")
+        .rsplit('/')
+        .next()
+        .filter(|value| !value.is_empty())
+        .unwrap_or(path)
+        .to_string()
+}
+
 fn extract_client_archive(
     archive_path: &Path,
     game_path: &Path,
-    state_path: &Path,
     message_sender: &mpsc::UnboundedSender<LauncherMessage>,
-    prefer_native_extract: bool,
     preserved_paths: &HashSet<String>,
+    manifest: &PackageManifest,
 ) -> Result<()> {
-    if preserved_paths.is_empty()
-        && prefer_native_extract
-        && try_extract_client_archive_natively(archive_path, game_path, message_sender)?
-    {
-        return Ok(());
-    }
-
     let archive_file = File::open(archive_path)
         .with_context(|| format!("Falha ao abrir {}", archive_path.display()))?;
     let mut archive =
         ZipArchive::new(archive_file).context("Falha ao ler o pacote ZIP do cliente")?;
 
+    let manifest_files_by_url: HashMap<String, PackageFile> = manifest
+        .files
+        .iter()
+        .cloned()
+        .map(|file| (normalize_manifest_path(&file.url), file))
+        .collect();
     let mut relevant_entries = Vec::new();
+    let mut found_urls = HashSet::new();
     let mut total_bytes = 0u64;
 
     for index in 0..archive.len() {
@@ -819,17 +867,47 @@ fn extract_client_archive(
         let Some(relative_path) = archive_relative_path(entry.name()) else {
             continue;
         };
-        if preserved_paths.contains(&archive_path_key(&relative_path)) {
+        let archive_key = archive_path_key(&relative_path);
+        let Some(file) = manifest_files_by_url.get(&archive_key) else {
+            continue;
+        };
+        if preserved_paths.contains(&normalize_manifest_path(&file.localfile)) {
             continue;
         }
 
-        let Some(destination) = archive_destination_for(&relative_path, game_path, state_path)
-        else {
-            continue;
-        };
-
+        let destination = file.target_path(game_path);
         total_bytes += entry.size();
-        relevant_entries.push((index, relative_path, destination, entry.size()));
+        found_urls.insert(archive_key);
+        relevant_entries.push((
+            index,
+            relative_path,
+            destination,
+            entry.size(),
+            file.clone(),
+        ));
+    }
+
+    let missing_file_count = manifest
+        .files
+        .iter()
+        .filter(|file| !preserved_paths.contains(&normalize_manifest_path(&file.localfile)))
+        .filter(|file| !found_urls.contains(&normalize_manifest_path(&file.url)))
+        .count();
+    let missing_files: Vec<String> = manifest
+        .files
+        .iter()
+        .filter(|file| !preserved_paths.contains(&normalize_manifest_path(&file.localfile)))
+        .filter(|file| !found_urls.contains(&normalize_manifest_path(&file.url)))
+        .take(5)
+        .map(|file| file.url.clone())
+        .collect();
+
+    if !missing_files.is_empty() {
+        return Err(anyhow!(
+            "O pacote completo do cliente nao contem {} arquivo(s) do manifesto; primeiros: {}",
+            missing_file_count,
+            missing_files.join(", ")
+        ));
     }
 
     if relevant_entries.is_empty() {
@@ -844,7 +922,7 @@ fn extract_client_archive(
         .checked_sub(STATUS_REPORT_INTERVAL)
         .unwrap_or_else(Instant::now);
 
-    for (position, (index, relative_path, destination, entry_size)) in
+    for (position, (index, relative_path, destination, entry_size, file)) in
         relevant_entries.iter().enumerate()
     {
         let mut entry = archive
@@ -858,30 +936,41 @@ fn extract_client_archive(
             }
         }
 
-        if prefer_native_extract {
-            let mut output = BufWriter::with_capacity(
-                256 * 1024,
-                File::create(destination)
-                    .with_context(|| format!("Falha ao criar {}", destination.display()))?,
-            );
-            std::io::copy(&mut entry, &mut output).with_context(|| {
-                format!(
-                    "Falha ao extrair {} para {}",
-                    relative_path.display(),
-                    destination.display()
-                )
-            })?;
-        } else {
-            let temp_path = temporary_path(destination, "archive");
-            if temp_path.exists() {
-                fs::remove_file(&temp_path)?;
-            }
+        let temp_path = temporary_path(destination, "archive");
+        if temp_path.exists() {
+            fs::remove_file(&temp_path)?;
+        }
 
-            let mut output = BufWriter::with_capacity(
+        if file.should_unpack() {
+            let output = BufWriter::with_capacity(
                 256 * 1024,
                 File::create(&temp_path)
                     .with_context(|| format!("Falha ao criar {}", temp_path.display()))?,
             );
+            let mut output = HashingWriter::new(output);
+            let mut packed_reader = BufReader::new(&mut entry);
+            lzma_rs::lzma_decompress(&mut packed_reader, &mut output).with_context(|| {
+                format!(
+                    "Falha ao descompactar {} para {}",
+                    relative_path.display(),
+                    destination.display()
+                )
+            })?;
+            output.flush()?;
+            let (output, actual_hash, actual_size) = output.finish();
+            drop(output);
+
+            verify_size_value(destination, file.unpackedsize, actual_size)?;
+            if let Some(expected_hash) = &file.unpackedhash {
+                verify_hash_value(destination, expected_hash, &actual_hash)?;
+            }
+        } else {
+            let output = BufWriter::with_capacity(
+                256 * 1024,
+                File::create(&temp_path)
+                    .with_context(|| format!("Falha ao criar {}", temp_path.display()))?,
+            );
+            let mut output = HashingWriter::new(output);
             std::io::copy(&mut entry, &mut output).with_context(|| {
                 format!(
                     "Falha ao extrair {} para {}",
@@ -890,9 +979,16 @@ fn extract_client_archive(
                 )
             })?;
             output.flush()?;
-            replace_file(&temp_path, destination)?;
+            let (output, actual_hash, actual_size) = output.finish();
+            drop(output);
+
+            verify_size_value(destination, file.packedsize, actual_size)?;
+            if let Some(expected_hash) = &file.packedhash {
+                verify_hash_value(destination, expected_hash, &actual_hash)?;
+            }
         }
 
+        replace_file(&temp_path, destination)?;
         extracted_bytes += *entry_size;
 
         let should_report = last_report_at.elapsed() >= STATUS_REPORT_INTERVAL
@@ -936,89 +1032,6 @@ fn archive_preserved_bootstrap_paths(
         .filter(|file| file.bootstrap_only && file.target_path(game_path).exists())
         .map(|file| normalize_manifest_path(&file.localfile))
         .collect()
-}
-
-#[cfg(windows)]
-fn try_extract_client_archive_natively(
-    archive_path: &Path,
-    game_path: &Path,
-    message_sender: &mpsc::UnboundedSender<LauncherMessage>,
-) -> Result<bool> {
-    if !archive_is_native_extract_safe(archive_path)? {
-        info!(
-            "Pacote bootstrap nao passou na validacao para extracao nativa; usando fallback Rust"
-        );
-        return Ok(false);
-    }
-
-    send_message(
-        message_sender,
-        LauncherMessage::SetStatus(
-            "Extraindo pacote completo do cliente com extrator nativo do Windows...".to_string(),
-        ),
-    )?;
-
-    let status = Command::new("tar.exe")
-        .arg("-xf")
-        .arg(archive_path)
-        .arg("-C")
-        .arg(game_path)
-        .status();
-
-    let Ok(status) = status else {
-        info!("Falha ao iniciar tar.exe; usando fallback Rust");
-        return Ok(false);
-    };
-
-    if !status.success() {
-        info!(
-            "tar.exe retornou status {:?}; usando fallback Rust",
-            status.code()
-        );
-        return Ok(false);
-    }
-
-    send_message(
-        message_sender,
-        LauncherMessage::DownloadProgress(ARCHIVE_EXTRACTION_PROGRESS_END),
-    )?;
-
-    Ok(true)
-}
-
-#[cfg(not(windows))]
-fn try_extract_client_archive_natively(
-    _archive_path: &Path,
-    _game_path: &Path,
-    _message_sender: &mpsc::UnboundedSender<LauncherMessage>,
-) -> Result<bool> {
-    Ok(false)
-}
-
-fn archive_is_native_extract_safe(archive_path: &Path) -> Result<bool> {
-    let archive_file = File::open(archive_path)
-        .with_context(|| format!("Falha ao abrir {}", archive_path.display()))?;
-    let mut archive =
-        ZipArchive::new(archive_file).context("Falha ao validar o pacote ZIP do cliente")?;
-
-    for index in 0..archive.len() {
-        let entry = archive
-            .by_index(index)
-            .with_context(|| format!("Falha ao ler entrada {} do ZIP", index))?;
-        if entry.is_dir() {
-            continue;
-        }
-
-        let Some(relative_path) = archive_relative_path(entry.name()) else {
-            return Ok(false);
-        };
-
-        if !archive_relative_path_is_extractable_at_game_root(&relative_path) {
-            return Ok(false);
-        }
-    }
-
-    Ok(true)
 }
 
 fn archive_relative_path(entry_name: &str) -> Option<PathBuf> {
@@ -1076,6 +1089,7 @@ fn normalize_manifest_path(path: &str) -> String {
     path.replace('\\', "/").to_ascii_lowercase()
 }
 
+#[cfg(test)]
 fn archive_destination_for(
     relative_path: &Path,
     game_path: &Path,
@@ -1096,18 +1110,6 @@ fn archive_destination_for(
         }
         _ => None,
     }
-}
-
-fn archive_relative_path_is_extractable_at_game_root(relative_path: &Path) -> bool {
-    let normalized = relative_path.to_string_lossy().replace('\\', "/");
-
-    matches!(
-        normalized.as_str(),
-        "package.json" | "package.json.version" | "assets.json" | "assets.json.sha256"
-    ) || normalized.starts_with("assets/")
-        || normalized.starts_with("bin/")
-        || normalized.starts_with("conf/")
-        || normalized.starts_with("sounds/")
 }
 
 fn report_download_progress(
@@ -1184,8 +1186,59 @@ fn replace_file(source: &Path, destination: &Path) -> Result<()> {
     })
 }
 
-fn verify_hash(path: &Path, expected_hash: &str) -> Result<()> {
-    let actual_hash = hash_file(path)?;
+struct HashingWriter<W> {
+    inner: W,
+    hasher: Sha256,
+    bytes_written: u64,
+}
+
+impl<W> HashingWriter<W> {
+    fn new(inner: W) -> Self {
+        Self {
+            inner,
+            hasher: Sha256::new(),
+            bytes_written: 0,
+        }
+    }
+
+    fn finish(self) -> (W, String, u64) {
+        (
+            self.inner,
+            bytes_to_hex(&self.hasher.finalize()),
+            self.bytes_written,
+        )
+    }
+}
+
+impl<W: Write> Write for HashingWriter<W> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buffer)?;
+        self.hasher.update(&buffer[..written]);
+        self.bytes_written += written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+fn verify_size_value(path: &Path, expected_size: Option<u64>, actual_size: u64) -> Result<()> {
+    if let Some(expected_size) = expected_size {
+        if actual_size != expected_size {
+            return Err(anyhow!(
+                "Tamanho invalido para {} (esperado {}, obtido {})",
+                path.display(),
+                expected_size,
+                actual_size
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn verify_hash_value(path: &Path, expected_hash: &str, actual_hash: &str) -> Result<()> {
     let expected = expected_hash.to_ascii_lowercase();
     if actual_hash != expected {
         return Err(anyhow!(
@@ -1195,7 +1248,13 @@ fn verify_hash(path: &Path, expected_hash: &str) -> Result<()> {
             actual_hash
         ));
     }
+
     Ok(())
+}
+
+fn verify_hash(path: &Path, expected_hash: &str) -> Result<()> {
+    let actual_hash = hash_file(path)?;
+    verify_hash_value(path, expected_hash, &actual_hash)
 }
 
 fn hash_file(path: &Path) -> Result<String> {
@@ -1235,12 +1294,17 @@ fn hex_nibble(value: u8) -> char {
 #[cfg(test)]
 mod tests {
     use super::{
-        PackageFile, UpdateManager, archive_destination_for, archive_relative_path,
-        archive_relative_path_is_extractable_at_game_root,
+        BULK_ARCHIVE_BYTE_THRESHOLD, PackageFile, PackageManifest, UpdateManager,
+        archive_destination_for, archive_relative_path, extract_client_archive,
     };
+    use crate::tokio::sync::mpsc;
+    use std::collections::HashSet;
     use std::fs;
+    use std::io::{Cursor, Write};
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
 
     #[test]
     fn compressed_files_unpack_by_default() {
@@ -1333,14 +1397,66 @@ mod tests {
     }
 
     #[test]
-    fn native_extract_validation_accepts_conf_files() {
-        assert!(archive_relative_path_is_extractable_at_game_root(
-            Path::new("conf/config.ini")
-        ));
+    fn archive_extract_decompresses_manifest_lzma_entries() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("penultima-launcher-test-{unique}"));
+        let game_path = root.join("game");
+        let archive_path = root.join("client.zip");
+        fs::create_dir_all(&root).unwrap();
+
+        let client_bytes = b"fast-client-binary";
+        let mut packed_client = Vec::new();
+        lzma_rs::lzma_compress(&mut Cursor::new(client_bytes), &mut packed_client).unwrap();
+
+        let archive_file = fs::File::create(&archive_path).unwrap();
+        let mut archive = ZipWriter::new(archive_file);
+        archive
+            .start_file(
+                "penultima-client-main/bin/client.exe.lzma",
+                SimpleFileOptions::default(),
+            )
+            .unwrap();
+        archive.write_all(&packed_client).unwrap();
+        archive.finish().unwrap();
+
+        let manifest = PackageManifest {
+            version: "test".to_string(),
+            files: vec![PackageFile {
+                url: "bin/client.exe.lzma".to_string(),
+                localfile: "bin/client.exe".to_string(),
+                packedhash: None,
+                packedsize: Some(packed_client.len() as u64),
+                unpackedhash: None,
+                unpackedsize: Some(client_bytes.len() as u64),
+                unpack: None,
+                bootstrap_only: false,
+            }],
+        };
+        let (sender, _receiver) = mpsc::unbounded_channel();
+
+        extract_client_archive(
+            &archive_path,
+            &game_path,
+            &sender,
+            &HashSet::new(),
+            &manifest,
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read(game_path.join("bin").join("client.exe")).unwrap(),
+            client_bytes
+        );
+        assert!(!game_path.join("bin").join("client.exe.lzma").exists());
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn public_feed_updates_do_not_use_archive_install() {
+    fn archive_install_is_used_when_launcher_state_is_missing() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -1365,7 +1481,69 @@ mod tests {
             bootstrap_only: false,
         }];
 
-        assert!(!manager.should_use_archive_install(&files, false, false));
+        assert!(manager.should_use_archive_install(&files, false, false));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn small_synced_update_uses_parallel_file_downloads() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("penultima-launcher-test-{unique}"));
+        let game_path = root.join("game");
+        let state_path = root.join("state");
+        let download_path = root.join("downloads");
+
+        fs::create_dir_all(game_path.join("bin")).unwrap();
+        fs::write(game_path.join("bin").join("client.exe"), b"test").unwrap();
+
+        let manager = UpdateManager::new(download_path, game_path, state_path);
+        let files = vec![PackageFile {
+            url: "assets/catalog-content.json".to_string(),
+            localfile: "assets/catalog-content.json".to_string(),
+            packedhash: None,
+            packedsize: Some(4),
+            unpackedhash: None,
+            unpackedsize: None,
+            unpack: Some(false),
+            bootstrap_only: false,
+        }];
+
+        assert!(!manager.should_use_archive_install(&files, false, true));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn large_synced_update_uses_archive_install() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("penultima-launcher-test-{unique}"));
+        let game_path = root.join("game");
+        let state_path = root.join("state");
+        let download_path = root.join("downloads");
+
+        fs::create_dir_all(game_path.join("bin")).unwrap();
+        fs::write(game_path.join("bin").join("client.exe"), b"test").unwrap();
+
+        let manager = UpdateManager::new(download_path, game_path, state_path);
+        let files = vec![PackageFile {
+            url: "assets/big.dat".to_string(),
+            localfile: "assets/big.dat".to_string(),
+            packedhash: None,
+            packedsize: Some(BULK_ARCHIVE_BYTE_THRESHOLD),
+            unpackedhash: None,
+            unpackedsize: None,
+            unpack: Some(false),
+            bootstrap_only: false,
+        }];
+
+        assert!(manager.should_use_archive_install(&files, false, true));
 
         let _ = fs::remove_dir_all(root);
     }

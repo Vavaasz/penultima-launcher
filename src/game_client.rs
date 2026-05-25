@@ -108,6 +108,10 @@ struct ClientWindowSearch {
     windows: Vec<HWND>,
 }
 
+struct AllClientWindowSearch {
+    windows: Vec<HWND>,
+}
+
 struct ClientWindow {
     hwnd: HWND,
     info: ClientWindowInfo,
@@ -150,13 +154,24 @@ unsafe extern "system" fn enum_client_windows(hwnd: HWND, lparam: LPARAM) -> BOO
     TRUE
 }
 
+unsafe extern "system" fn enum_all_windows(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let search = unsafe { &mut *(lparam as *mut AllClientWindowSearch) };
+
+    unsafe {
+        if GetWindowTextLengthW(hwnd) > 0 {
+            search.windows.push(hwnd);
+        }
+    }
+
+    TRUE
+}
+
 pub struct GameClient {
     game_process: Option<ProcessHandle>,
     active_clients: Vec<ProcessHandle>,
     window_state_path: Option<PathBuf>,
     last_window_state: Option<ClientWindowState>,
     pending_window_restore_pids: HashSet<u32>,
-    pub max_clients: usize,
 }
 
 impl Default for GameClient {
@@ -167,21 +182,13 @@ impl Default for GameClient {
             window_state_path: None,
             last_window_state: None,
             pending_window_restore_pids: HashSet::new(),
-            max_clients: 3,
         }
     }
 }
 
 impl GameClient {
-    pub fn new(max_clients: usize) -> Self {
-        Self {
-            game_process: None,
-            active_clients: Vec::new(),
-            window_state_path: None,
-            last_window_state: None,
-            pending_window_restore_pids: HashSet::new(),
-            max_clients,
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn set_window_state_path(&mut self, path: PathBuf) {
@@ -221,9 +228,6 @@ impl GameClient {
 
     pub fn launch_additional_client(&mut self, game_path: &PathBuf) -> Result<()> {
         self.update_additional_clients();
-        if self.active_clients.len() >= self.max_clients {
-            return Err(anyhow!("Numero maximo de clients atingido"));
-        }
 
         let client_path = Self::find_client_path(game_path)?;
         let process =
@@ -237,9 +241,6 @@ impl GameClient {
 
     pub fn launch_otclient_launcher(&mut self, launcher_path: &PathBuf) -> Result<()> {
         self.update_additional_clients();
-        if self.active_clients.len() >= self.max_clients {
-            return Err(anyhow!("Numero maximo de clients atingido"));
-        }
 
         if !launcher_path.exists() {
             return Err(anyhow!("OTCLauncher.exe nao encontrado"));
@@ -312,11 +313,40 @@ impl GameClient {
         has_main || additional_count > 0
     }
 
-    pub fn minimize_clients_to_tray(&mut self) -> usize {
+    pub fn visible_client_window_infos(&mut self) -> Vec<ClientWindowInfo> {
         self.sync_client_state();
+        unique_client_window_infos(
+            self.all_client_window_details()
+                .into_iter()
+                .filter(|client_window| client_window.info.visible)
+                .map(|client_window| client_window.info)
+                .collect(),
+        )
+    }
 
+    pub fn minimize_clients_to_tray(&mut self) -> usize {
+        self.minimize_client_windows_to_tray(None)
+    }
+
+    pub fn minimize_client_to_tray(&mut self, pid: u32) -> Option<ClientWindowInfo> {
+        let minimized_count = self.minimize_client_windows_to_tray(Some(pid));
+        if minimized_count == 0 {
+            None
+        } else {
+            self.all_client_window_infos()
+                .into_iter()
+                .find(|client| client.pid == pid)
+        }
+    }
+
+    fn minimize_client_windows_to_tray(&mut self, pid: Option<u32>) -> usize {
+        self.sync_client_state();
         let mut hidden_pids = HashSet::new();
-        for client_window in self.tracked_client_window_details() {
+        for client_window in self.all_client_window_details() {
+            if pid.is_some_and(|target_pid| client_window.info.pid != target_pid) {
+                continue;
+            }
+
             unsafe {
                 if client_window.info.visible {
                     ShowWindow(client_window.hwnd, SW_HIDE);
@@ -332,7 +362,11 @@ impl GameClient {
         self.sync_client_state();
 
         let mut restored_pids = HashSet::new();
-        for client_window in self.tracked_client_window_details() {
+        for client_window in self.all_client_window_details() {
+            if client_window.info.visible {
+                continue;
+            }
+
             unsafe {
                 ShowWindow(client_window.hwnd, SW_RESTORE);
                 ShowWindow(client_window.hwnd, SW_SHOW);
@@ -348,7 +382,7 @@ impl GameClient {
         self.sync_client_state();
 
         let mut restored_client = None;
-        for client_window in self.tracked_client_window_details() {
+        for client_window in self.all_client_window_details() {
             if client_window.info.pid != pid {
                 continue;
             }
@@ -370,12 +404,45 @@ impl GameClient {
     pub fn hidden_client_window_infos(&mut self) -> Vec<ClientWindowInfo> {
         self.sync_client_state();
         unique_client_window_infos(
-            self.tracked_client_window_details()
+            self.all_client_window_details()
                 .into_iter()
                 .filter(|client_window| !client_window.info.visible)
                 .map(|client_window| client_window.info)
                 .collect(),
         )
+    }
+
+    fn all_client_window_infos(&self) -> Vec<ClientWindowInfo> {
+        unique_client_window_infos(
+            self.all_client_window_details()
+                .into_iter()
+                .map(|client_window| client_window.info)
+                .collect(),
+        )
+    }
+
+    fn all_client_window_details(&self) -> Vec<ClientWindow> {
+        let tracked_pids = self.tracked_client_pids();
+        let mut search = AllClientWindowSearch {
+            windows: Vec::new(),
+        };
+
+        unsafe {
+            EnumWindows(
+                Some(enum_all_windows),
+                &mut search as *mut AllClientWindowSearch as LPARAM,
+            );
+        }
+
+        search
+            .windows
+            .into_iter()
+            .filter_map(client_window_from_hwnd)
+            .filter(|client_window| {
+                tracked_pids.contains(&client_window.info.pid)
+                    || is_client_window_title(&client_window.info.title)
+            })
+            .collect()
     }
 
     fn tracked_client_pids(&self) -> HashSet<u32> {
@@ -628,6 +695,13 @@ pub fn character_name_from_window_title(title: &str, pid: u32) -> String {
     trimmed.to_string()
 }
 
+fn is_client_window_title(title: &str) -> bool {
+    let trimmed = title.trim();
+    trimmed.eq_ignore_ascii_case("Tibia")
+        || trimmed == CLIENT_WINDOW_TITLE_PREFIX.trim_end()
+        || trimmed.starts_with(CLIENT_WINDOW_TITLE_PREFIX)
+}
+
 fn client_window_title_rank(title: &str) -> usize {
     title
         .trim()
@@ -698,7 +772,9 @@ pub fn show_window(window_state: &Arc<Mutex<WindowState>>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClientWindowInfo, GameClient, character_name_from_window_title};
+    use super::{
+        ClientWindowInfo, GameClient, character_name_from_window_title, is_client_window_title,
+    };
     use std::path::PathBuf;
 
     #[test]
@@ -738,6 +814,13 @@ mod tests {
             "Cliente 55"
         );
         assert_eq!(character_name_from_window_title("", 55), "Cliente 55");
+    }
+
+    #[test]
+    fn detects_tibia_client_window_titles() {
+        assert!(is_client_window_title("Tibia"));
+        assert!(is_client_window_title("Tibia - Waldir"));
+        assert!(!is_client_window_title("Other Window"));
     }
 
     #[test]

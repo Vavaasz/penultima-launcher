@@ -39,7 +39,7 @@ pub const DOWNLOADS_METADATA_URL: &str =
 
 /// Arquivo ZIP do feed completo do cliente para bootstrap rapido
 pub const CLIENT_GITHUB_ARCHIVE_URL: &str =
-    "https://ultimaotserv.online/downloads/Penultima-Client-Feed.zip";
+    "https://codeload.github.com/Vavaasz/penultima-client/zip/refs/heads/main";
 
 /// Slug do Partner Launcher OTCRP usado pelo Penultima
 pub const OTCRP_PARTNER_SLUG: &str = "penultima";
@@ -245,9 +245,6 @@ pub const PING_GOOD_THRESHOLD: u32 = 100;
 
 /// Classe de alta prioridade do Windows
 pub const HIGH_PRIORITY_CLASS: u32 = 0x00000080;
-
-/// Número máximo de clientes suportados
-pub const MAX_CLIENTS: usize = 3;
 
 /// Tamanho do buffer para operações de rede
 pub const NETWORK_BUFFER_SIZE: usize = 4096;

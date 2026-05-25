@@ -35,7 +35,7 @@ use cli::{Args, show_console};
 use client_version::ClientVersionManager;
 use config_modal::ConfigModal;
 use constants::*;
-use game_client::{GameClient, WindowState};
+use game_client::{ClientWindowInfo, GameClient, WindowState};
 use instance_manager::InstanceManager;
 use message_system::LauncherMessage;
 use tray_manager::{TrayAction, TrayManager};
@@ -68,9 +68,11 @@ struct GameLauncher {
     show_force_update_modal: bool, // Nova variável para controlar a visibilidade do modal de confirmação
     disable_auto_start: bool,      // Nova variável para controlar o início automático
     config_modal: Option<ConfigModal>, // Novo campo para o modal de configuração
-    launcher_version: String,      // Nova variável para armazenar a versão do launcher
+    show_minimize_client_modal: bool,
+    minimize_client_candidates: Vec<ClientWindowInfo>,
+    launcher_version: String, // Nova variável para armazenar a versão do launcher
     client_version: Option<String>, // Nova variável para armazenar a versão do client.exe
-    server_ping: Option<u32>,      // Nova variável para armazenar o ping do servidor
+    server_ping: Option<u32>, // Nova variável para armazenar o ping do servidor
     last_ping_check: Option<Instant>, // Momento da última verificação de ping
     was_hidden: bool, // Controla transição de visibilidade para otimizar CPU quando minimizado
     clients_hidden_to_tray: bool,
@@ -132,6 +134,8 @@ impl Default for GameLauncher {
             show_force_update_modal: false, // Modal de confirmação desabilitado por padrão
             disable_auto_start,
             config_modal: None, // Inicializar o modal de configuração como None
+            show_minimize_client_modal: false,
+            minimize_client_candidates: Vec::new(),
             launcher_version: env!("CARGO_PKG_VERSION").to_string(), // Versão do launcher do Cargo.toml
             client_version: None,
             server_ping: None,     // Inicializar ping como None
@@ -215,7 +219,7 @@ impl GameLauncher {
                 TrayAction::ShowLauncher => self.restore_launcher_from_tray(ctx),
                 TrayAction::RestoreClients => self.restore_clients_from_tray(ctx),
                 TrayAction::RestoreClient(pid) => self.restore_client_from_tray(ctx, pid),
-                TrayAction::MinimizeClients => self.minimize_clients_to_tray(ctx),
+                TrayAction::MinimizeClients => self.open_minimize_client_selector(ctx),
                 TrayAction::QuitLauncher => std::process::exit(0),
             }
         }
@@ -242,6 +246,41 @@ impl GameLauncher {
         }
     }
 
+    fn open_minimize_client_selector(&mut self, ctx: &egui::Context) {
+        self.minimize_client_candidates = self.game_client.visible_client_window_infos();
+
+        if self.minimize_client_candidates.is_empty() {
+            self.show_minimize_client_modal = false;
+            self.status = "Nenhuma janela de cliente encontrada".to_string();
+            self.temp_message_time = Some(Instant::now());
+            self.is_alert_message = false;
+        } else {
+            self.show_minimize_client_modal = true;
+        }
+
+        ctx.request_repaint();
+    }
+
+    fn minimize_client_to_tray(&mut self, ctx: &egui::Context, pid: u32) {
+        let minimized_client = self.game_client.minimize_client_to_tray(pid);
+        let hidden_client_count = self.refresh_hidden_client_restore_menu();
+        self.clients_hidden_to_tray = hidden_client_count > 0;
+        self.set_clients_tray_icon_visible(hidden_client_count > 0);
+
+        self.status = if let Some(client) = minimized_client {
+            format!(
+                "Cliente {} enviado para a system tray",
+                client.character_name
+            )
+        } else {
+            "Cliente nao encontrado".to_string()
+        };
+        self.temp_message_time = Some(Instant::now());
+        self.is_alert_message = false;
+        self.show_minimize_client_modal = false;
+        ctx.request_repaint();
+    }
+
     fn minimize_clients_to_tray(&mut self, ctx: &egui::Context) {
         let hidden_count = self.game_client.minimize_clients_to_tray();
         let hidden_client_count = self.refresh_hidden_client_restore_menu();
@@ -263,7 +302,7 @@ impl GameLauncher {
         } else {
             self.clients_hidden_to_tray = false;
             self.set_clients_tray_icon_visible(false);
-            self.status = "Nenhum cliente aberto pelo launcher".to_string();
+            self.status = "Nenhum cliente aberto".to_string();
         }
 
         self.temp_message_time = Some(Instant::now());
@@ -290,7 +329,7 @@ impl GameLauncher {
         } else {
             self.clients_hidden_to_tray = false;
             self.set_clients_tray_icon_visible(false);
-            self.status = "Nenhum cliente aberto pelo launcher".to_string();
+            self.status = "Nenhum cliente aberto".to_string();
         }
 
         self.temp_message_time = Some(Instant::now());
@@ -309,7 +348,7 @@ impl GameLauncher {
         } else if self.game_client.has_tracked_clients() {
             "Cliente nao encontrado na system tray".to_string()
         } else {
-            "Nenhum cliente aberto pelo launcher".to_string()
+            "Nenhum cliente aberto".to_string()
         };
 
         self.temp_message_time = Some(Instant::now());
@@ -602,6 +641,147 @@ impl GameLauncher {
         self.temp_message_time = Some(Instant::now());
         self.is_alert_message = false;
         ctx.request_repaint();
+    }
+
+    fn render_minimize_client_modal(&mut self, ctx: &egui::Context) {
+        if !self.show_minimize_client_modal {
+            return;
+        }
+
+        let candidates = self.minimize_client_candidates.clone();
+        let mut selected_pid = None;
+        let mut minimize_all = false;
+        let mut refresh = false;
+        let mut cancel = false;
+
+        egui::Window::new("Minimizar cliente")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .fixed_size([420.0, 300.0])
+            .frame(
+                egui::Frame::window(&ctx.style())
+                    .fill(egui::Color32::from_rgba_unmultiplied(20, 20, 20, 250)),
+            )
+            .show(ctx, |ui| {
+                ui.vertical(|ui| {
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new("Clientes abertos")
+                            .size(14.0)
+                            .color(egui::Color32::from_rgb(200, 200, 200)),
+                    );
+                    ui.add_space(6.0);
+
+                    egui::ScrollArea::vertical()
+                        .max_height(190.0)
+                        .show(ui, |ui| {
+                            if candidates.is_empty() {
+                                ui.label(
+                                    egui::RichText::new("Nenhuma janela de cliente encontrada")
+                                        .size(13.0)
+                                        .color(egui::Color32::from_rgb(160, 160, 160)),
+                                );
+                            }
+
+                            for client in &candidates {
+                                let mut label =
+                                    format!("{} (PID {})", client.character_name, client.pid);
+                                if client.title != client.character_name {
+                                    label.push_str(&format!(" - {}", client.title));
+                                }
+
+                                if ui
+                                    .add_sized(
+                                        [ui.available_width(), 30.0],
+                                        egui::Button::new(
+                                            egui::RichText::new(label)
+                                                .size(13.0)
+                                                .color(egui::Color32::from_rgb(220, 220, 220)),
+                                        )
+                                        .fill(egui::Color32::from_rgba_unmultiplied(
+                                            45, 45, 45, 240,
+                                        ))
+                                        .corner_radius(4.0)
+                                        .stroke(egui::Stroke::NONE),
+                                    )
+                                    .clicked()
+                                {
+                                    selected_pid = Some(client.pid);
+                                }
+                            }
+                        });
+
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_sized(
+                                [80.0, 28.0],
+                                egui::Button::new(
+                                    egui::RichText::new("Atualizar")
+                                        .size(13.0)
+                                        .color(egui::Color32::from_rgb(220, 220, 220)),
+                                )
+                                .fill(egui::Color32::from_rgba_unmultiplied(45, 45, 45, 255))
+                                .corner_radius(2.0)
+                                .stroke(egui::Stroke::NONE),
+                            )
+                            .clicked()
+                        {
+                            refresh = true;
+                        }
+
+                        if ui
+                            .add_sized(
+                                [80.0, 28.0],
+                                egui::Button::new(
+                                    egui::RichText::new("Todos")
+                                        .size(13.0)
+                                        .color(egui::Color32::from_rgb(220, 220, 220)),
+                                )
+                                .fill(egui::Color32::from_rgba_unmultiplied(45, 45, 45, 255))
+                                .corner_radius(2.0)
+                                .stroke(egui::Stroke::NONE),
+                            )
+                            .clicked()
+                        {
+                            minimize_all = true;
+                        }
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add_sized(
+                                    [80.0, 28.0],
+                                    egui::Button::new(
+                                        egui::RichText::new("Cancelar")
+                                            .size(13.0)
+                                            .color(egui::Color32::from_rgb(220, 220, 220)),
+                                    )
+                                    .fill(egui::Color32::from_rgba_unmultiplied(45, 45, 45, 255))
+                                    .corner_radius(2.0)
+                                    .stroke(egui::Stroke::NONE),
+                                )
+                                .clicked()
+                            {
+                                cancel = true;
+                            }
+                        });
+                    });
+                });
+            });
+
+        if let Some(pid) = selected_pid {
+            self.minimize_client_to_tray(ctx, pid);
+        } else if minimize_all {
+            self.show_minimize_client_modal = false;
+            self.minimize_clients_to_tray(ctx);
+        } else if refresh {
+            self.minimize_client_candidates = self.game_client.visible_client_window_infos();
+            ctx.request_repaint();
+        } else if cancel {
+            self.show_minimize_client_modal = false;
+            ctx.request_repaint();
+        }
     }
 
     fn is_game_running(&mut self) -> bool {
@@ -1118,6 +1298,7 @@ impl GameLauncher {
 
         // Renderizar o painel central usando a função dedicada
         self.render_central_panel(ctx, available_size);
+        self.render_minimize_client_modal(ctx);
 
         // Renderizar o modal de confirmação para Forçar Atualização
         if self.show_force_update_modal {
@@ -1434,7 +1615,7 @@ async fn main() -> Result<()> {
             cc.egui_ctx.set_style(style);
 
             let mut launcher = GameLauncher::default();
-            launcher.game_client = GameClient::new(MAX_CLIENTS);
+            launcher.game_client = GameClient::new();
             launcher.window_state = window_state;
             launcher.initialized = false;
             launcher.auto_hide = args.auto_hide;
