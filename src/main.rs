@@ -8,11 +8,13 @@ use image;
 use log::info;
 use std::fs::{self};
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio;
 mod app_dirs;
+mod boosted_preview;
 mod cache;
 mod cli;
 mod client_version;
@@ -27,10 +29,12 @@ mod otclient;
 mod tray_manager;
 mod ui_components;
 mod updates;
+mod website_status;
 mod window_manager;
 
 // Importações diretas dos novos módulos
 use app_dirs::AppDirs;
+use boosted_preview::{BoostedPreviewData, BoostedPreviewKind};
 use cli::{Args, show_console};
 use client_version::ClientVersionManager;
 use config_modal::ConfigModal;
@@ -39,7 +43,25 @@ use game_client::{ClientWindowInfo, GameClient, WindowState};
 use instance_manager::InstanceManager;
 use message_system::LauncherMessage;
 use tray_manager::{TrayAction, TrayManager};
+use website_status::WebsiteStatus;
 use window_manager::WindowManager;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LauncherTab {
+    Dashboard,
+    News,
+}
+
+struct BoostedPreviewTextureFrame {
+    texture: egui::TextureHandle,
+    delay_ms: u32,
+}
+
+struct BoostedPreviewTexture {
+    url: String,
+    frames: Vec<BoostedPreviewTextureFrame>,
+    total_delay_ms: u32,
+}
 
 struct GameLauncher {
     status: String,
@@ -64,7 +86,10 @@ struct GameLauncher {
     window_manager: Option<WindowManager>, // Gerenciador de janela
     background_texture: Option<egui::TextureHandle>, // Nova propriedade para o papel de parede
     logo_texture: Option<egui::TextureHandle>, // Nova propriedade para o logo
-    show_footer: bool,                  // Nova variável para controlar a visibilidade do rodapé
+    splash_logo_texture: Option<egui::TextureHandle>,
+    startup_splash_started: Instant,
+    startup_splash_finished: bool,
+    show_footer: bool, // Nova variável para controlar a visibilidade do rodapé
     show_force_update_modal: bool, // Nova variável para controlar a visibilidade do modal de confirmação
     disable_auto_start: bool,      // Nova variável para controlar o início automático
     config_modal: Option<ConfigModal>, // Novo campo para o modal de configuração
@@ -74,6 +99,17 @@ struct GameLauncher {
     client_version: Option<String>, // Nova variável para armazenar a versão do client.exe
     server_ping: Option<u32>, // Nova variável para armazenar o ping do servidor
     last_ping_check: Option<Instant>, // Momento da última verificação de ping
+    ping_in_progress: bool,
+    website_status: WebsiteStatus,
+    website_status_loading: bool,
+    last_website_status_refresh: Option<Instant>,
+    boosted_creature_preview: Option<BoostedPreviewTexture>,
+    boosted_boss_preview: Option<BoostedPreviewTexture>,
+    boosted_creature_preview_loading_url: Option<String>,
+    boosted_boss_preview_loading_url: Option<String>,
+    boosted_creature_preview_error: Option<String>,
+    boosted_boss_preview_error: Option<String>,
+    selected_tab: LauncherTab,
     was_hidden: bool, // Controla transição de visibilidade para otimizar CPU quando minimizado
     clients_hidden_to_tray: bool,
     tray_manager: Option<TrayManager>,
@@ -129,7 +165,10 @@ impl Default for GameLauncher {
             is_alert_message: false,
             window_manager: None,
             background_texture: None,
-            logo_texture: None,             // Inicializar o logo como None
+            logo_texture: None, // Inicializar o logo como None
+            splash_logo_texture: None,
+            startup_splash_started: Instant::now(),
+            startup_splash_finished: false,
             show_footer: false,             // Rodapé desabilitado por padrão
             show_force_update_modal: false, // Modal de confirmação desabilitado por padrão
             disable_auto_start,
@@ -140,6 +179,17 @@ impl Default for GameLauncher {
             client_version: None,
             server_ping: None,     // Inicializar ping como None
             last_ping_check: None, // Inicializar última verificação como None
+            ping_in_progress: false,
+            website_status: WebsiteStatus::default(),
+            website_status_loading: false,
+            last_website_status_refresh: None,
+            boosted_creature_preview: None,
+            boosted_boss_preview: None,
+            boosted_creature_preview_loading_url: None,
+            boosted_boss_preview_loading_url: None,
+            boosted_creature_preview_error: None,
+            boosted_boss_preview_error: None,
+            selected_tab: LauncherTab::Dashboard,
             was_hidden: false,
             clients_hidden_to_tray: false,
             tray_manager: None,
@@ -164,6 +214,256 @@ impl GameLauncher {
     fn load_client_version(&mut self) {
         self.client_version =
             ClientVersionManager::load_client_version(&self.download_path, &self.game_path);
+    }
+
+    pub fn open_external_url(&mut self, url: &str) {
+        match Command::new("rundll32.exe")
+            .arg("url.dll,FileProtocolHandler")
+            .arg(url)
+            .spawn()
+        {
+            Ok(_) => {
+                self.status = "Abrindo link no navegador".to_string();
+                self.temp_message_time = Some(Instant::now());
+                self.is_alert_message = false;
+            }
+            Err(error) => {
+                self.status = format!("Erro ao abrir link: {}", error);
+                self.temp_message_time = Some(Instant::now());
+                self.is_alert_message = true;
+            }
+        }
+    }
+
+    fn refresh_website_status(&mut self) {
+        let now = Instant::now();
+
+        if self.website_status_loading || self.message_sender.is_none() {
+            return;
+        }
+
+        if let Some(last_refresh) = self.last_website_status_refresh {
+            if now.duration_since(last_refresh) < WEBSITE_STATUS_REFRESH_INTERVAL {
+                return;
+            }
+        }
+
+        self.website_status_loading = true;
+        self.last_website_status_refresh = Some(now);
+
+        if let Some(message_sender) = &self.message_sender {
+            let sender = message_sender.clone();
+            tokio::spawn(async move {
+                match website_status::fetch_website_status().await {
+                    Ok(status) => {
+                        let _ = sender.send(LauncherMessage::WebsiteStatusLoaded(status));
+                    }
+                    Err(error) => {
+                        let _ = sender
+                            .send(LauncherMessage::WebsiteStatusError(format!("{:#}", error)));
+                    }
+                }
+            });
+        }
+    }
+
+    fn apply_website_status_error(&mut self, error: String) {
+        self.website_status_loading = false;
+        self.website_status.error = Some(error);
+    }
+
+    fn refresh_boosted_previews(&mut self) {
+        self.queue_boosted_preview(
+            BoostedPreviewKind::Creature,
+            self.website_status.boosted_creature_image_url.clone(),
+        );
+        self.queue_boosted_preview(
+            BoostedPreviewKind::Boss,
+            self.website_status.boosted_boss_image_url.clone(),
+        );
+    }
+
+    fn queue_boosted_preview(&mut self, kind: BoostedPreviewKind, image_url: Option<String>) {
+        let Some(url) = image_url else {
+            return;
+        };
+
+        if self.boosted_preview_url(kind).as_deref() == Some(url.as_str())
+            || self.boosted_preview_loading_url(kind) == Some(url.as_str())
+        {
+            return;
+        }
+
+        self.set_boosted_preview_loading(kind, Some(url.clone()));
+        self.set_boosted_preview_error(kind, None);
+
+        if let Some(message_sender) = &self.message_sender {
+            let sender = message_sender.clone();
+            tokio::spawn(async move {
+                match boosted_preview::fetch_boosted_preview(url.clone()).await {
+                    Ok(preview) => {
+                        let _ = sender.send(LauncherMessage::BoostedPreviewLoaded(kind, preview));
+                    }
+                    Err(error) => {
+                        let _ = sender.send(LauncherMessage::BoostedPreviewError(
+                            kind,
+                            url,
+                            format!("{:#}", error),
+                        ));
+                    }
+                }
+            });
+        }
+    }
+
+    fn apply_boosted_preview(
+        &mut self,
+        ctx: &egui::Context,
+        kind: BoostedPreviewKind,
+        preview: BoostedPreviewData,
+    ) {
+        if self.boosted_preview_loading_url(kind) != Some(preview.url.as_str()) {
+            return;
+        }
+
+        let mut total_delay_ms = 0_u32;
+        let frames = preview
+            .frames
+            .into_iter()
+            .enumerate()
+            .map(|(index, frame)| {
+                let color_image =
+                    egui::ColorImage::from_rgba_unmultiplied(frame.size, frame.rgba.as_slice());
+                let texture = ctx.load_texture(
+                    format!("boosted-preview-{:?}-{}", kind, index),
+                    color_image,
+                    egui::TextureOptions::NEAREST,
+                );
+                total_delay_ms = total_delay_ms.saturating_add(frame.delay_ms.max(60));
+
+                BoostedPreviewTextureFrame {
+                    texture,
+                    delay_ms: frame.delay_ms.max(60),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        if frames.is_empty() {
+            self.set_boosted_preview_error(kind, Some("preview had no frames".to_string()));
+            self.set_boosted_preview_loading(kind, None);
+            return;
+        }
+
+        let texture = BoostedPreviewTexture {
+            url: preview.url,
+            frames,
+            total_delay_ms: total_delay_ms.max(60),
+        };
+
+        match kind {
+            BoostedPreviewKind::Creature => self.boosted_creature_preview = Some(texture),
+            BoostedPreviewKind::Boss => self.boosted_boss_preview = Some(texture),
+        }
+
+        self.set_boosted_preview_loading(kind, None);
+        self.set_boosted_preview_error(kind, None);
+    }
+
+    fn apply_boosted_preview_error(
+        &mut self,
+        kind: BoostedPreviewKind,
+        url: String,
+        error: String,
+    ) {
+        if self.boosted_preview_loading_url(kind) != Some(url.as_str()) {
+            return;
+        }
+
+        self.set_boosted_preview_loading(kind, None);
+        self.set_boosted_preview_error(kind, Some(error));
+    }
+
+    fn boosted_preview_url(&self, kind: BoostedPreviewKind) -> Option<String> {
+        match kind {
+            BoostedPreviewKind::Creature => self
+                .boosted_creature_preview
+                .as_ref()
+                .map(|preview| preview.url.clone()),
+            BoostedPreviewKind::Boss => self
+                .boosted_boss_preview
+                .as_ref()
+                .map(|preview| preview.url.clone()),
+        }
+    }
+
+    fn boosted_preview_loading_url(&self, kind: BoostedPreviewKind) -> Option<&str> {
+        match kind {
+            BoostedPreviewKind::Creature => self
+                .boosted_creature_preview_loading_url
+                .as_ref()
+                .map(String::as_str),
+            BoostedPreviewKind::Boss => self
+                .boosted_boss_preview_loading_url
+                .as_ref()
+                .map(String::as_str),
+        }
+    }
+
+    fn set_boosted_preview_loading(
+        &mut self,
+        kind: BoostedPreviewKind,
+        loading_url: Option<String>,
+    ) {
+        match kind {
+            BoostedPreviewKind::Creature => self.boosted_creature_preview_loading_url = loading_url,
+            BoostedPreviewKind::Boss => self.boosted_boss_preview_loading_url = loading_url,
+        }
+    }
+
+    fn set_boosted_preview_error(&mut self, kind: BoostedPreviewKind, error: Option<String>) {
+        match kind {
+            BoostedPreviewKind::Creature => self.boosted_creature_preview_error = error,
+            BoostedPreviewKind::Boss => self.boosted_boss_preview_error = error,
+        }
+    }
+
+    fn current_boosted_preview_frame(
+        &self,
+        kind: BoostedPreviewKind,
+        ctx: &egui::Context,
+    ) -> Option<&BoostedPreviewTextureFrame> {
+        let preview = match kind {
+            BoostedPreviewKind::Creature => self.boosted_creature_preview.as_ref(),
+            BoostedPreviewKind::Boss => self.boosted_boss_preview.as_ref(),
+        }?;
+
+        if preview.frames.is_empty() {
+            return None;
+        }
+
+        let elapsed_ms =
+            ((ctx.input(|input| input.time) * 1000.0) as u32) % preview.total_delay_ms.max(60);
+        let mut cursor = 0_u32;
+
+        for frame in &preview.frames {
+            cursor = cursor.saturating_add(frame.delay_ms.max(60));
+            if elapsed_ms < cursor {
+                return Some(frame);
+            }
+        }
+
+        preview.frames.first()
+    }
+
+    fn boosted_preview_is_loading(&self, kind: BoostedPreviewKind) -> bool {
+        self.boosted_preview_loading_url(kind).is_some()
+    }
+
+    fn boosted_preview_error(&self, kind: BoostedPreviewKind) -> Option<&String> {
+        match kind {
+            BoostedPreviewKind::Creature => self.boosted_creature_preview_error.as_ref(),
+            BoostedPreviewKind::Boss => self.boosted_boss_preview_error.as_ref(),
+        }
     }
 
     fn tray_manager_mut(&mut self) -> Option<&mut TrayManager> {
@@ -373,6 +673,10 @@ impl GameLauncher {
             return;
         }
 
+        if self.ping_in_progress {
+            return;
+        }
+
         // Verificar se já passou tempo suficiente desde a última verificação
         // Para o primeiro ping (quando last_ping_check é None), executar imediatamente
         if let Some(last_check) = self.last_ping_check {
@@ -383,6 +687,7 @@ impl GameLauncher {
 
         // Atualizar o momento da última verificação
         self.last_ping_check = Some(now);
+        self.ping_in_progress = true;
 
         // Executar ping TCP customizado de forma não-bloqueante
         if let Some(message_sender) = &self.message_sender {
@@ -391,8 +696,8 @@ impl GameLauncher {
             tokio::spawn(async move {
                 let mut ping_times = Vec::new();
 
-                // Fazer 4 pings para calcular a média
-                for _ in 0..4 {
+                // Fazer 3 pings curtos para calcular a media sem deixar a UI presa.
+                for _ in 0..3 {
                     match Self::tcp_ping_server().await {
                         Ok(duration) => {
                             ping_times.push(duration);
@@ -435,27 +740,34 @@ impl GameLauncher {
     async fn tcp_ping_server() -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpStream;
+        use tokio::time::timeout;
 
         let start = Instant::now();
 
         // Conectar ao servidor
-        let mut stream = TcpStream::connect(get_ping_server_address()).await?;
+        let mut stream = timeout(
+            PING_REQUEST_TIMEOUT,
+            TcpStream::connect(get_ping_server_address()),
+        )
+        .await??;
 
         // Criar pacote de ping
         let packet = Self::create_packet("info");
 
         // Enviar pacote
-        stream.write_all(&packet).await?;
+        timeout(PING_REQUEST_TIMEOUT, stream.write_all(&packet)).await??;
 
         // Ler resposta
         let mut buffer = vec![0; NETWORK_BUFFER_SIZE];
-        let bytes_read = stream.read(&mut buffer).await?;
+        let bytes_read = timeout(PING_REQUEST_TIMEOUT, stream.read(&mut buffer)).await??;
 
         let duration = start.elapsed().as_millis() as u32;
 
         // Apenas confirmar que houve resposta (não fazer parse do XML)
         if bytes_read > 0 {
             info!("Resposta recebida: {} bytes em {}ms", bytes_read, duration);
+        } else {
+            return Err("empty ping response".into());
         }
 
         Ok(duration)
@@ -848,6 +1160,39 @@ impl GameLauncher {
                         LauncherMessage::PingResult(ping) => {
                             self.server_ping = ping;
                             self.last_ping_check = Some(Instant::now());
+                            self.ping_in_progress = false;
+                        }
+                        LauncherMessage::WebsiteStatusLoaded(status) => {
+                            self.website_status = status;
+                            self.website_status_loading = false;
+                        }
+                        LauncherMessage::WebsiteStatusError(error) => {
+                            self.website_status_loading = false;
+                            self.website_status.error = Some(error);
+                        }
+                        LauncherMessage::BoostedPreviewLoaded(kind, preview) => {
+                            let _ = preview;
+                            match kind {
+                                BoostedPreviewKind::Creature => {
+                                    self.boosted_creature_preview_loading_url = None;
+                                }
+                                BoostedPreviewKind::Boss => {
+                                    self.boosted_boss_preview_loading_url = None;
+                                }
+                            }
+                        }
+                        LauncherMessage::BoostedPreviewError(kind, url, error) => {
+                            let _ = url;
+                            match kind {
+                                BoostedPreviewKind::Creature => {
+                                    self.boosted_creature_preview_loading_url = None;
+                                    self.boosted_creature_preview_error = Some(error);
+                                }
+                                BoostedPreviewKind::Boss => {
+                                    self.boosted_boss_preview_loading_url = None;
+                                    self.boosted_boss_preview_error = Some(error);
+                                }
+                            }
                         }
                         LauncherMessage::SetStatus(status) => {
                             self.status = status;
@@ -1199,6 +1544,8 @@ impl GameLauncher {
         if self.update_sender.is_none() {
             self.setup_update_channel();
         }
+        self.refresh_website_status();
+        self.refresh_boosted_previews();
 
         if let Some(receiver) = &mut self.message_receiver {
             // Coletar todas as mensagens disponíveis em um vetor
@@ -1270,6 +1617,21 @@ impl GameLauncher {
                         LauncherMessage::PingResult(ping) => {
                             self.server_ping = ping;
                             self.last_ping_check = Some(Instant::now());
+                            self.ping_in_progress = false;
+                        }
+                        LauncherMessage::WebsiteStatusLoaded(status) => {
+                            self.website_status = status;
+                            self.website_status_loading = false;
+                            self.refresh_boosted_previews();
+                        }
+                        LauncherMessage::WebsiteStatusError(error) => {
+                            self.apply_website_status_error(error);
+                        }
+                        LauncherMessage::BoostedPreviewLoaded(kind, preview) => {
+                            self.apply_boosted_preview(ctx, kind, preview);
+                        }
+                        LauncherMessage::BoostedPreviewError(kind, url, error) => {
+                            self.apply_boosted_preview_error(kind, url, error);
                         }
                         LauncherMessage::RestartLauncherForUpdate => {
                             self.restart_launcher_for_update(ctx);
@@ -1451,7 +1813,7 @@ impl GameLauncher {
     fn load_background(&mut self, ctx: &egui::Context) {
         // Carregar o papel de parede
         if let Ok(image_data) =
-            image::load_from_memory(include_bytes!("../assets/background-artwork.png"))
+            image::load_from_memory(include_bytes!("../assets/website-background.jpg"))
         {
             let image = image_data.into_rgba8();
             let (width, height) = image.dimensions();
@@ -1491,9 +1853,31 @@ impl GameLauncher {
         } else {
             info!("Não foi possível carregar o logo");
         }
+
+        if let Ok(logo_data) =
+            image::load_from_memory(include_bytes!("../assets/ultima-website-logo.png"))
+        {
+            let logo = logo_data.into_rgba8();
+            let (width, height) = logo.dimensions();
+            let rgba = logo.into_raw();
+            let texture =
+                egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba);
+
+            self.splash_logo_texture =
+                Some(ctx.load_texture("splash-logo", texture, egui::TextureOptions::LINEAR));
+
+            info!("Logo de abertura carregado em {}x{}", width, height);
+        } else {
+            info!("NÃ£o foi possÃ­vel carregar o logo de abertura");
+        }
     }
 
     fn render_central_panel(&mut self, ctx: &egui::Context, available_size: egui::Vec2) {
+        if !self.startup_splash_finished {
+            ui_components::render_startup_splash(self, ctx, available_size);
+            return;
+        }
+
         // Renderizar todos os componentes de UI
         ui_components::render_all_components(self, ctx, available_size);
 

@@ -117,10 +117,11 @@ impl WindowManager {
             renderer: eframe::Renderer::Glow,
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([WINDOW_SIZE.0, WINDOW_SIZE.1])
+                .with_min_inner_size([MIN_WINDOW_SIZE.0, MIN_WINDOW_SIZE.1])
                 .with_visible(true)
-                .with_resizable(false)
+                .with_resizable(true)
                 .with_maximized(false)
-                .with_maximize_button(false)
+                .with_maximize_button(true)
                 .with_title(APP_NAME)
                 .with_decorations(true)
                 .with_transparent(false)

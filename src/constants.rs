@@ -33,6 +33,24 @@ pub const CLIENT_GITHUB_RAW_BASE_URL: &str =
 /// Host publico usado para resolver arquivos publicados no site
 pub const WEBSITE_BASE_URL: &str = "https://ultimaotserv.online";
 
+/// Public Discord invite shown by the website header
+pub const DISCORD_URL: &str = "https://discord.gg/ytNUWGbjg6";
+
+/// Website changelog page used by the launcher news tab
+pub const CHANGELOG_URL: &str = "https://ultimaotserv.online/?changelog";
+
+/// Website event calendar page used by the launcher dashboard
+pub const EVENT_CALENDAR_URL: &str = "https://ultimaotserv.online/?eventcalendar";
+
+/// Website battle pass page used by the launcher dashboard
+pub const BATTLE_PASS_URL: &str = "https://ultimaotserv.online/?bpass";
+
+/// Website weekly package page used by the launcher dashboard
+pub const PACK_WEEK_URL: &str = "https://ultimaotserv.online/?packweek";
+
+/// Website investor page used by the launcher dashboard
+pub const INVESTMENT_URL: &str = "https://ultimaotserv.online/?investment";
+
 /// Metadata publica dos downloads publicados no site
 pub const DOWNLOADS_METADATA_URL: &str =
     "https://ultimaotserv.online/downloads/penultima-downloads.json";
@@ -143,10 +161,13 @@ pub const PROXY_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Intervalo entre verificações de ping (30 segundos)
 pub const PING_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+pub const PING_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Timeout para requisições HTTP
 pub const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 pub const HTTP_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+pub const WEBSITE_STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
+pub const STARTUP_SPLASH_DURATION: Duration = Duration::from_millis(3000);
 
 /// Intervalo para verificação de instâncias
 pub const INSTANCE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
@@ -189,13 +210,14 @@ pub const UI_MESSAGE_DISPLAY_DURATION: Duration = Duration::from_secs(2);
 // ================================
 
 /// Tamanho desejado da janela principal
-pub const MAIN_WINDOW_SIZE: (f32, f32) = (800.0, 450.0);
+pub const MAIN_WINDOW_SIZE: (f32, f32) = (1240.0, 800.0);
+pub const MIN_WINDOW_SIZE: (f32, f32) = (1040.0, 680.0);
 
 /// Tamanho da janela (alias para compatibilidade)
 pub const WINDOW_SIZE: (f32, f32) = MAIN_WINDOW_SIZE;
 
 /// Tamanho do logo redimensionado
-pub const LOGO_SIZE: (f32, f32) = (215.0, 150.0);
+pub const LOGO_SIZE: (f32, f32) = (180.0, 126.0);
 
 /// Altura do rodapé
 pub const FOOTER_HEIGHT: f32 = 35.0;
