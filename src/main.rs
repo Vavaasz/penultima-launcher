@@ -37,7 +37,7 @@ mod window_manager;
 
 // Importações diretas dos novos módulos
 use app_dirs::AppDirs;
-use boosted_preview::{BoostedPreviewData, BoostedPreviewKind};
+use boosted_preview::{BoostedPreviewData, BoostedPreviewKind, BoostedPreviewLoadPhase};
 use cli::{Args, show_console};
 use client_version::ClientVersionManager;
 use config_modal::ConfigModal;
@@ -50,6 +50,7 @@ use website_status::WebsiteStatus;
 use window_manager::WindowManager;
 
 const MAX_CONCURRENT_OFFER_PREVIEWS: usize = 2;
+const BOOSTED_ANIMATED_PREVIEW_FRAMES: usize = 4;
 const CLIENTS_TRAY_SYNC_INTERVAL: Duration = Duration::from_millis(1000);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -421,12 +422,55 @@ impl GameLauncher {
         if let Some(message_sender) = &self.message_sender {
             let sender = message_sender.clone();
             let preview_cache_dir = self.state_path.join("preview-cache");
-            tokio::spawn(async move {
-                match boosted_preview::fetch_boosted_preview_cached(url.clone(), preview_cache_dir)
+            let static_url = website_status::static_sprite_preview_url(&url);
+
+            if static_url != url {
+                let static_sender = sender.clone();
+                let static_cache_dir = preview_cache_dir.join("boosted-static");
+                let display_url = url.clone();
+                tokio::spawn(async move {
+                    match boosted_preview::fetch_boosted_static_preview_cached_as(
+                        static_url,
+                        display_url.clone(),
+                        static_cache_dir,
+                    )
                     .await
+                    {
+                        Ok(preview) => {
+                            let _ = static_sender.send(LauncherMessage::BoostedPreviewLoaded(
+                                kind,
+                                preview,
+                                BoostedPreviewLoadPhase::StaticPlaceholder,
+                            ));
+                        }
+                        Err(error) => {
+                            info!(
+                                "Falha ao carregar preview estatico boosted {:?}: {:#}",
+                                kind, error
+                            );
+                        }
+                    }
+                });
+            }
+
+            let animated_url = website_status::bounded_animated_sprite_preview_url(
+                &url,
+                BOOSTED_ANIMATED_PREVIEW_FRAMES,
+            );
+            tokio::spawn(async move {
+                match boosted_preview::fetch_boosted_preview_cached_as(
+                    animated_url,
+                    url.clone(),
+                    preview_cache_dir,
+                )
+                .await
                 {
                     Ok(preview) => {
-                        let _ = sender.send(LauncherMessage::BoostedPreviewLoaded(kind, preview));
+                        let _ = sender.send(LauncherMessage::BoostedPreviewLoaded(
+                            kind,
+                            preview,
+                            BoostedPreviewLoadPhase::Animated,
+                        ));
                     }
                     Err(error) => {
                         let _ = sender.send(LauncherMessage::BoostedPreviewError(
@@ -562,6 +606,7 @@ impl GameLauncher {
         ctx: &egui::Context,
         kind: BoostedPreviewKind,
         preview: BoostedPreviewData,
+        phase: BoostedPreviewLoadPhase,
     ) {
         if self.boosted_preview_loading_url(kind) != Some(preview.url.as_str()) {
             return;
@@ -586,7 +631,9 @@ impl GameLauncher {
             BoostedPreviewKind::Boss => self.boosted_boss_preview = Some(texture),
         }
 
-        self.set_boosted_preview_loading(kind, None);
+        if phase == BoostedPreviewLoadPhase::Animated {
+            self.set_boosted_preview_loading(kind, None);
+        }
         self.set_boosted_preview_error(kind, None);
     }
 
@@ -1603,21 +1650,11 @@ impl GameLauncher {
                         self.website_status_loading = false;
                         self.website_status.error = Some(error);
                     }
-                    LauncherMessage::BoostedPreviewLoaded(kind, preview) => {
-                        self.apply_boosted_preview(ctx, kind, preview);
+                    LauncherMessage::BoostedPreviewLoaded(kind, preview, phase) => {
+                        self.apply_boosted_preview(ctx, kind, preview, phase);
                     }
                     LauncherMessage::BoostedPreviewError(kind, url, error) => {
-                        let _ = url;
-                        match kind {
-                            BoostedPreviewKind::Creature => {
-                                self.boosted_creature_preview_loading_url = None;
-                                self.boosted_creature_preview_error = Some(error);
-                            }
-                            BoostedPreviewKind::Boss => {
-                                self.boosted_boss_preview_loading_url = None;
-                                self.boosted_boss_preview_error = Some(error);
-                            }
-                        }
+                        self.apply_boosted_preview_error(kind, url, error);
                     }
                     LauncherMessage::OfferPreviewLoaded(preview) => {
                         self.apply_offer_preview(ctx, preview);
@@ -2092,8 +2129,8 @@ impl GameLauncher {
                         LauncherMessage::WebsiteStatusError(error) => {
                             self.apply_website_status_error(error);
                         }
-                        LauncherMessage::BoostedPreviewLoaded(kind, preview) => {
-                            self.apply_boosted_preview(ctx, kind, preview);
+                        LauncherMessage::BoostedPreviewLoaded(kind, preview, phase) => {
+                            self.apply_boosted_preview(ctx, kind, preview, phase);
                         }
                         LauncherMessage::BoostedPreviewError(kind, url, error) => {
                             self.apply_boosted_preview_error(kind, url, error);

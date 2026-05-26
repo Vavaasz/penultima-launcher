@@ -1,5 +1,5 @@
 // Mensagens que podem ser enviadas ao launcher
-use crate::boosted_preview::{BoostedPreviewData, BoostedPreviewKind};
+use crate::boosted_preview::{BoostedPreviewData, BoostedPreviewKind, BoostedPreviewLoadPhase};
 use crate::website_status::WebsiteStatus;
 use std::path::PathBuf;
 
@@ -21,7 +21,11 @@ pub enum LauncherMessage {
     PingResult(Option<u32>), // Resultado do ping do servidor
     WebsiteStatusLoaded(WebsiteStatus),
     WebsiteStatusError(String),
-    BoostedPreviewLoaded(BoostedPreviewKind, BoostedPreviewData),
+    BoostedPreviewLoaded(
+        BoostedPreviewKind,
+        BoostedPreviewData,
+        BoostedPreviewLoadPhase,
+    ),
     BoostedPreviewError(BoostedPreviewKind, String, String),
     OfferPreviewLoaded(BoostedPreviewData),
     OfferPreviewError(String, String),

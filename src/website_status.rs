@@ -374,29 +374,48 @@ fn parse_offer_previews(html: &str, limit: usize) -> Vec<OfferPreview> {
     previews
 }
 
-fn static_sprite_preview_url(url: &str) -> String {
+pub(crate) fn static_sprite_preview_url(url: &str) -> String {
+    sprite_preview_url_with_params(url, &[("animate", "0".to_string())])
+}
+
+pub(crate) fn bounded_animated_sprite_preview_url(url: &str, max_frames: usize) -> String {
+    sprite_preview_url_with_params(
+        url,
+        &[
+            ("animate", "1".to_string()),
+            ("max_frames", max_frames.max(1).to_string()),
+        ],
+    )
+}
+
+fn sprite_preview_url_with_params(url: &str, replacements: &[(&str, String)]) -> String {
     if !url.contains("tools/sprite.php") {
         return url.to_string();
     }
 
-    let Some((base, query)) = url.split_once('?') else {
-        return format!("{}?animate=0", url);
-    };
-
-    let mut had_animate = false;
+    let (base, query) = url.split_once('?').unwrap_or((url, ""));
+    let mut seen = Vec::new();
     let mut params = Vec::new();
-    for param in query.split('&') {
+    for param in query.split('&').filter(|param| !param.is_empty()) {
         let key = param.split_once('=').map(|(key, _)| key).unwrap_or(param);
-        if key.eq_ignore_ascii_case("animate") {
-            had_animate = true;
-            params.push("animate=0".to_string());
+        if let Some((replacement_key, replacement_value)) = replacements
+            .iter()
+            .find(|(replacement_key, _)| key.eq_ignore_ascii_case(replacement_key))
+        {
+            seen.push(*replacement_key);
+            params.push(format!("{}={}", replacement_key, replacement_value));
         } else {
             params.push(param.to_string());
         }
     }
 
-    if !had_animate {
-        params.push("animate=0".to_string());
+    for (replacement_key, replacement_value) in replacements {
+        if !seen
+            .iter()
+            .any(|seen_key| seen_key.eq_ignore_ascii_case(replacement_key))
+        {
+            params.push(format!("{}={}", replacement_key, replacement_value));
+        }
     }
 
     format!("{}?{}", base, params.join("&"))
@@ -413,7 +432,7 @@ fn capture_attr(attrs: &str, attr_name: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::static_sprite_preview_url;
+    use super::{bounded_animated_sprite_preview_url, static_sprite_preview_url};
 
     #[test]
     fn offer_sprite_previews_request_static_images() {
@@ -430,6 +449,15 @@ mod tests {
         assert_eq!(
             static_sprite_preview_url(url),
             "https://ultimaotserv.online/tools/sprite.php?type=item&id=60525&animate=0"
+        );
+    }
+
+    #[test]
+    fn boosted_sprite_previews_request_bounded_animations() {
+        let url = "https://ultimaotserv.online/tools/sprite.php?type=item&id=60525&animate=0";
+        assert_eq!(
+            bounded_animated_sprite_preview_url(url, 16),
+            "https://ultimaotserv.online/tools/sprite.php?type=item&id=60525&animate=1&max_frames=16"
         );
     }
 }

@@ -24,6 +24,12 @@ pub enum BoostedPreviewKind {
     Boss,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoostedPreviewLoadPhase {
+    StaticPlaceholder,
+    Animated,
+}
+
 #[derive(Debug, Clone)]
 pub struct BoostedPreviewFrame {
     pub size: [usize; 2],
@@ -50,12 +56,47 @@ pub async fn fetch_boosted_preview_cached(
     .await
 }
 
+pub async fn fetch_boosted_preview_cached_as(
+    fetch_url: String,
+    display_url: String,
+    cache_dir: PathBuf,
+) -> Result<BoostedPreviewData> {
+    let mut preview = fetch_boosted_preview_cached(fetch_url, cache_dir).await?;
+    preview.url = display_url;
+    Ok(preview)
+}
+
 pub async fn fetch_static_preview_cached(
     url: String,
     max_dimension: u32,
     cache_dir: PathBuf,
 ) -> Result<BoostedPreviewData> {
     fetch_preview_cached(url, 1, max_dimension, cache_dir).await
+}
+
+pub async fn fetch_static_preview_cached_as(
+    fetch_url: String,
+    display_url: String,
+    max_dimension: u32,
+    cache_dir: PathBuf,
+) -> Result<BoostedPreviewData> {
+    let mut preview = fetch_static_preview_cached(fetch_url, max_dimension, cache_dir).await?;
+    preview.url = display_url;
+    Ok(preview)
+}
+
+pub async fn fetch_boosted_static_preview_cached_as(
+    fetch_url: String,
+    display_url: String,
+    cache_dir: PathBuf,
+) -> Result<BoostedPreviewData> {
+    fetch_static_preview_cached_as(
+        fetch_url,
+        display_url,
+        BOOSTED_PREVIEW_MAX_DIMENSION,
+        cache_dir,
+    )
+    .await
 }
 
 async fn fetch_preview_cached(
