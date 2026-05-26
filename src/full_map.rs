@@ -2,7 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use futures_util::StreamExt;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
@@ -197,7 +197,7 @@ pub fn install_full_minimap_from_zip(
     let mut entries = Vec::new();
     let mut total_bytes = 0u64;
     for index in 0..archive.len() {
-        let entry = archive
+        let mut entry = archive
             .by_index(index)
             .with_context(|| format!("Falha ao ler entrada {} do ZIP", index))?;
         if entry.is_dir() {
@@ -207,6 +207,11 @@ pub fn install_full_minimap_from_zip(
         let Some((root, relative_path)) = full_map_archive_path(entry.name()) else {
             continue;
         };
+
+        if root == FullMapInstallRoot::Minimap {
+            let entry_name = entry.name().to_string();
+            validate_minimap_archive_entry(&entry_name, &mut entry)?;
+        }
 
         total_bytes += entry.size();
         entries.push(FullMapArchiveEntry {
@@ -227,6 +232,7 @@ pub fn install_full_minimap_from_zip(
         .with_context(|| format!("Nao foi possivel criar {}", minimap_dir.display()))?;
     fs::create_dir_all(&assets_dir)
         .with_context(|| format!("Nao foi possivel criar {}", assets_dir.display()))?;
+    cleanup_stale_full_map_minimap(&minimap_dir, &entries)?;
     cleanup_stale_full_map_assets(&assets_dir, &entries)?;
 
     let mut created_directories = HashSet::new();
@@ -245,6 +251,12 @@ pub fn install_full_minimap_from_zip(
             FullMapInstallRoot::Assets => &assets_dir,
         };
         let destination = destination_root.join(&entry_to_install.relative_path);
+        let is_catalog_entry = entry_to_install.root == FullMapInstallRoot::Assets
+            && entry_to_install
+                .relative_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case("catalog-content.json"));
 
         if let Some(parent) = destination.parent() {
             if created_directories.insert(parent.to_path_buf()) {
@@ -253,35 +265,39 @@ pub fn install_full_minimap_from_zip(
             }
         }
 
-        let temp_path = destination.with_extension(format!(
-            "{}fullmap.tmp",
-            destination
-                .extension()
-                .and_then(|value| value.to_str())
-                .map(|value| format!("{value}."))
-                .unwrap_or_default()
-        ));
-        if temp_path.exists() {
-            fs::remove_file(&temp_path)?;
-        }
+        if is_catalog_entry {
+            merge_catalog_content_from_archive(&destination, &mut entry)?;
+        } else {
+            let temp_path = destination.with_extension(format!(
+                "{}fullmap.tmp",
+                destination
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .map(|value| format!("{value}."))
+                    .unwrap_or_default()
+            ));
+            if temp_path.exists() {
+                fs::remove_file(&temp_path)?;
+            }
 
-        {
-            let mut output = BufWriter::with_capacity(
-                256 * 1024,
-                File::create(&temp_path)
-                    .with_context(|| format!("Falha ao criar {}", temp_path.display()))?,
-            );
-            std::io::copy(&mut entry, &mut output).with_context(|| {
-                format!(
-                    "Falha ao extrair {} para {}",
-                    entry_to_install.relative_path.display(),
-                    destination.display()
-                )
-            })?;
-            output.flush()?;
-        }
+            {
+                let mut output = BufWriter::with_capacity(
+                    256 * 1024,
+                    File::create(&temp_path)
+                        .with_context(|| format!("Falha ao criar {}", temp_path.display()))?,
+                );
+                std::io::copy(&mut entry, &mut output).with_context(|| {
+                    format!(
+                        "Falha ao extrair {} para {}",
+                        entry_to_install.relative_path.display(),
+                        destination.display()
+                    )
+                })?;
+                output.flush()?;
+            }
 
-        replace_file(&temp_path, &destination)?;
+            replace_file(&temp_path, &destination)?;
+        }
         extracted_files += 1;
         extracted_bytes += entry_to_install.size;
 
@@ -611,8 +627,218 @@ fn archive_relative_from_parts(
     (!relative_path.as_os_str().is_empty()).then_some((root, relative_path))
 }
 
+fn validate_minimap_archive_entry<R: Read>(
+    entry_name: &str,
+    entry: &mut zip::read::ZipFile<R>,
+) -> Result<()> {
+    let filename = Path::new(entry_name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(entry_name);
+    if !is_client_minimap_file(filename) {
+        return Ok(());
+    }
+
+    let mut header = [0u8; 26];
+    entry.read_exact(&mut header).with_context(|| {
+        format!(
+            "Minimap invalido em {}: nao foi possivel ler cabecalho PNG",
+            entry_name
+        )
+    })?;
+
+    let is_png = header.starts_with(b"\x89PNG\r\n\x1a\n") && &header[12..16] == b"IHDR";
+    let is_indexed_png = is_png && header[24] == 8 && header[25] == 3;
+    if !is_indexed_png {
+        return Err(anyhow!(
+            "Minimap invalido em {}: PNG precisa ser indexed/paletted para o cliente",
+            entry_name
+        ));
+    }
+
+    Ok(())
+}
+
+fn merge_catalog_content_from_archive<R: Read>(
+    catalog_path: &Path,
+    entry: &mut zip::read::ZipFile<R>,
+) -> Result<()> {
+    let mut archive_catalog = Vec::new();
+    entry
+        .read_to_end(&mut archive_catalog)
+        .context("Falha ao ler catalog-content.json do full map")?;
+
+    if !catalog_path.exists() {
+        return write_atomic_bytes(catalog_path, &archive_catalog);
+    }
+
+    let archive_catalog_value = match serde_json::from_slice::<serde_json::Value>(&archive_catalog)
+    {
+        Ok(value) => value,
+        Err(_) => return write_atomic_bytes(catalog_path, &archive_catalog),
+    };
+
+    let Some(mut current_catalog_value) = select_existing_catalog_for_merge(catalog_path)? else {
+        return write_atomic_bytes(catalog_path, &archive_catalog);
+    };
+
+    let Some(archive_entries) = map_catalog_entries(&archive_catalog_value) else {
+        return write_atomic_bytes(catalog_path, &archive_catalog);
+    };
+    if archive_entries.is_empty() {
+        return Ok(());
+    }
+
+    let Some(current_entries) = current_catalog_value.as_array_mut() else {
+        return write_atomic_bytes(catalog_path, &archive_catalog);
+    };
+
+    let mut replaced_types = HashSet::new();
+    for current_entry in current_entries.iter_mut() {
+        let Some(entry_type) = map_catalog_type(current_entry) else {
+            continue;
+        };
+        if let Some(replacement) = archive_entries.get(&entry_type) {
+            *current_entry = replacement.clone();
+            replaced_types.insert(entry_type);
+        }
+    }
+
+    for (entry_type, replacement) in archive_entries {
+        if !replaced_types.contains(&entry_type) {
+            current_entries.push(replacement);
+        }
+    }
+
+    write_catalog_value(catalog_path, &current_catalog_value)
+}
+
+fn map_catalog_entries(value: &serde_json::Value) -> Option<HashMap<String, serde_json::Value>> {
+    let entries = value.as_array()?;
+    let mut map_entries = HashMap::new();
+    for entry in entries {
+        let Some(entry_type) = map_catalog_type(entry) else {
+            continue;
+        };
+        map_entries.insert(entry_type, entry.clone());
+    }
+    Some(map_entries)
+}
+
+fn select_existing_catalog_for_merge(catalog_path: &Path) -> Result<Option<serde_json::Value>> {
+    let assets_dir = catalog_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut candidates = Vec::new();
+    for (order, candidate_path) in catalog_candidate_paths(catalog_path)?
+        .into_iter()
+        .enumerate()
+    {
+        let Ok(raw) = fs::read_to_string(&candidate_path) else {
+            continue;
+        };
+        let raw = raw.trim_start_matches('\u{feff}');
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+            continue;
+        };
+        let missing_files = count_missing_non_map_catalog_files(assets_dir, &value);
+        candidates.push((missing_files, order, value));
+    }
+
+    candidates.sort_by_key(|(missing_files, order, _)| (*missing_files, *order));
+    Ok(candidates.into_iter().next().map(|(_, _, value)| value))
+}
+
+fn catalog_candidate_paths(catalog_path: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    let mut seen = HashSet::new();
+    if seen.insert(catalog_path.to_path_buf()) {
+        paths.push(catalog_path.to_path_buf());
+    }
+
+    let Some(parent) = catalog_path.parent() else {
+        return Ok(paths);
+    };
+
+    for entry in
+        fs::read_dir(parent).with_context(|| format!("Falha ao listar {}", parent.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+
+        let filename = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        if filename.starts_with("catalog-content.json")
+            && filename.contains("bak")
+            && seen.insert(entry.path())
+        {
+            paths.push(entry.path());
+        }
+    }
+
+    Ok(paths)
+}
+
+fn count_missing_non_map_catalog_files(assets_dir: &Path, value: &serde_json::Value) -> usize {
+    let Some(entries) = value.as_array() else {
+        return usize::MAX;
+    };
+
+    entries
+        .iter()
+        .filter(|entry| map_catalog_type(entry).is_none())
+        .filter_map(|entry| entry.get("file").and_then(|file| file.as_str()))
+        .filter(|file| !assets_dir.join(file).exists())
+        .count()
+}
+
+fn map_catalog_type(value: &serde_json::Value) -> Option<String> {
+    let entry_type = value.get("type")?.as_str()?;
+    matches!(entry_type, "map" | "staticdata" | "staticmapdata").then(|| entry_type.to_string())
+}
+
+fn write_catalog_value(destination: &Path, value: &serde_json::Value) -> Result<()> {
+    let temp_path = destination.with_extension("json.fullmap.tmp");
+    if temp_path.exists() {
+        fs::remove_file(&temp_path)?;
+    }
+
+    {
+        let mut output = BufWriter::with_capacity(
+            256 * 1024,
+            File::create(&temp_path)
+                .with_context(|| format!("Falha ao criar {}", temp_path.display()))?,
+        );
+        serde_json::to_writer_pretty(&mut output, value)
+            .with_context(|| format!("Falha ao escrever {}", temp_path.display()))?;
+        output.write_all(b"\n")?;
+        output.flush()?;
+    }
+
+    replace_file(&temp_path, destination)
+}
+
+fn write_atomic_bytes(destination: &Path, bytes: &[u8]) -> Result<()> {
+    let temp_path = destination.with_extension("fullmap.tmp");
+    if temp_path.exists() {
+        fs::remove_file(&temp_path)?;
+    }
+
+    {
+        let mut output = BufWriter::with_capacity(
+            256 * 1024,
+            File::create(&temp_path)
+                .with_context(|| format!("Falha ao criar {}", temp_path.display()))?,
+        );
+        output.write_all(bytes)?;
+        output.flush()?;
+    }
+
+    replace_file(&temp_path, destination)
+}
+
 fn is_client_minimap_file(filename: &str) -> bool {
-    filename.starts_with("Minimap_Color_") || filename.starts_with("Minimap_WaypointCost_")
+    let lower = filename.to_ascii_lowercase();
+    lower.starts_with("minimap_color_") || lower.starts_with("minimap_waypointcost_")
 }
 
 fn is_asset_map_file(filename: &str) -> bool {
@@ -654,6 +880,43 @@ fn cleanup_stale_full_map_assets(assets_dir: &Path, entries: &[FullMapArchiveEnt
 
         fs::remove_file(entry.path())
             .with_context(|| format!("Falha ao remover asset antigo {}", entry.path().display()))?;
+    }
+
+    Ok(())
+}
+
+fn cleanup_stale_full_map_minimap(
+    minimap_dir: &Path,
+    entries: &[FullMapArchiveEntry],
+) -> Result<()> {
+    if !minimap_dir.exists() {
+        return Ok(());
+    }
+
+    let archive_minimap_filenames: HashSet<String> = entries
+        .iter()
+        .filter(|entry| entry.root == FullMapInstallRoot::Minimap)
+        .filter_map(|entry| entry.relative_path.file_name())
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .collect();
+
+    for entry in fs::read_dir(minimap_dir)
+        .with_context(|| format!("Falha ao listar {}", minimap_dir.display()))?
+    {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if !file_type.is_file() {
+            continue;
+        }
+
+        let filename = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        if !is_client_minimap_file(&filename) || archive_minimap_filenames.contains(&filename) {
+            continue;
+        }
+
+        fs::remove_file(entry.path()).with_context(|| {
+            format!("Falha ao remover minimap antigo {}", entry.path().display())
+        })?;
     }
 
     Ok(())
@@ -823,7 +1086,16 @@ mod tests {
         let archive_path = root.join("map.zip");
         let game_path = root.join("game");
         let assets_dir = game_path.join("assets");
+        let minimap_dir = game_path.join("minimap");
         fs::create_dir_all(&assets_dir).unwrap();
+        fs::create_dir_all(&minimap_dir).unwrap();
+        fs::write(minimap_dir.join("Minimap_Color_stale.png"), b"stale-color").unwrap();
+        fs::write(
+            minimap_dir.join("Minimap_WaypointCost_stale.png"),
+            b"stale-waypoint",
+        )
+        .unwrap();
+        fs::write(minimap_dir.join("notes.txt"), b"keep").unwrap();
         fs::write(assets_dir.join("map-bad.dat"), b"bad-map").unwrap();
         fs::write(assets_dir.join("staticdata-bad.dat"), b"bad-static").unwrap();
         fs::write(assets_dir.join("minimap-bad.bmp.lzma"), b"bad-minimap").unwrap();
@@ -833,10 +1105,10 @@ mod tests {
         create_zip(
             &archive_path,
             &[
-                ("minimap/Minimap_Color_0_0_7.png", b"color".as_slice()),
+                ("minimap/Minimap_Color_0_0_7.png", indexed_png_bytes()),
                 (
                     "Penultima/minimap/Minimap_WaypointCost_0_0_7.png",
-                    b"waypoint".as_slice(),
+                    indexed_png_bytes(),
                 ),
                 (
                     "assets/minimap-32-0001-0002-07-hash.bmp.lzma",
@@ -855,7 +1127,7 @@ mod tests {
         assert_eq!(stats.files, 7);
         assert_eq!(
             fs::read(game_path.join("minimap").join("Minimap_Color_0_0_7.png")).unwrap(),
-            b"color"
+            indexed_png_bytes()
         );
         assert_eq!(
             fs::read(
@@ -864,7 +1136,7 @@ mod tests {
                     .join("Minimap_WaypointCost_0_0_7.png")
             )
             .unwrap(),
-            b"waypoint"
+            indexed_png_bytes()
         );
         assert_eq!(
             fs::read(
@@ -915,7 +1187,154 @@ mod tests {
             fs::read(game_path.join("assets").join("custom.txt")).unwrap(),
             b"keep"
         );
+        assert!(
+            !game_path
+                .join("minimap")
+                .join("Minimap_Color_stale.png")
+                .exists()
+        );
+        assert!(
+            !game_path
+                .join("minimap")
+                .join("Minimap_WaypointCost_stale.png")
+                .exists()
+        );
+        assert_eq!(
+            fs::read(game_path.join("minimap").join("notes.txt")).unwrap(),
+            b"keep"
+        );
         assert!(!game_path.join("escape.txt").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn full_map_catalog_merge_preserves_existing_sprite_entries() {
+        let root = temp_dir("full-minimap-catalog-merge");
+        let archive_path = root.join("map.zip");
+        let game_path = root.join("game");
+        let assets_dir = game_path.join("assets");
+        fs::create_dir_all(&assets_dir).unwrap();
+        fs::write(
+            assets_dir.join("catalog-content.json"),
+            r#"[
+  {"type":"sprite","file":"sprites-installed.bmp.lzma"},
+  {"type":"map","file":"map-bad.dat"},
+  {"type":"staticdata","file":"staticdata-old.dat"},
+  {"type":"appearances","file":"appearances-installed.dat"}
+]"#,
+        )
+        .unwrap();
+        create_zip(
+            &archive_path,
+            &[
+                ("minimap/Minimap_Color_0_0_7.png", indexed_png_bytes()),
+                (
+                    "assets/catalog-content.json",
+                    br#"[
+  {"type":"sprite","file":"sprites-newer-missing.bmp.lzma"},
+  {"type":"map","file":"map-good.dat"},
+  {"type":"staticdata","file":"staticdata-good.dat"},
+  {"type":"staticmapdata","file":"staticmapdata-good.dat"}
+]"#,
+                ),
+                ("assets/map-good.dat", b"good-map".as_slice()),
+                ("assets/staticdata-good.dat", b"good-static".as_slice()),
+                (
+                    "assets/staticmapdata-good.dat",
+                    b"good-static-map".as_slice(),
+                ),
+            ],
+        );
+
+        install_full_minimap_from_zip(&archive_path, &game_path, None).unwrap();
+
+        let catalog_raw = fs::read_to_string(assets_dir.join("catalog-content.json")).unwrap();
+        let catalog = serde_json::from_str::<serde_json::Value>(&catalog_raw).unwrap();
+        let entries = catalog.as_array().unwrap();
+        assert!(entries.iter().any(|entry| {
+            entry.get("type").and_then(|value| value.as_str()) == Some("sprite")
+                && entry.get("file").and_then(|value| value.as_str())
+                    == Some("sprites-installed.bmp.lzma")
+        }));
+        assert!(!entries.iter().any(|entry| {
+            entry.get("file").and_then(|value| value.as_str())
+                == Some("sprites-newer-missing.bmp.lzma")
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.get("type").and_then(|value| value.as_str()) == Some("map")
+                && entry.get("file").and_then(|value| value.as_str()) == Some("map-good.dat")
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.get("type").and_then(|value| value.as_str()) == Some("staticdata")
+                && entry.get("file").and_then(|value| value.as_str()) == Some("staticdata-good.dat")
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.get("type").and_then(|value| value.as_str()) == Some("staticmapdata")
+                && entry.get("file").and_then(|value| value.as_str())
+                    == Some("staticmapdata-good.dat")
+        }));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn full_map_catalog_merge_uses_backup_when_current_references_missing_assets() {
+        let root = temp_dir("full-minimap-catalog-backup");
+        let archive_path = root.join("map.zip");
+        let game_path = root.join("game");
+        let assets_dir = game_path.join("assets");
+        fs::create_dir_all(&assets_dir).unwrap();
+        fs::write(assets_dir.join("sprites-installed.bmp.lzma"), b"sprite").unwrap();
+        fs::write(
+            assets_dir.join("catalog-content.json"),
+            r#"[
+  {"type":"sprite","file":"sprites-newer-missing.bmp.lzma"},
+  {"type":"map","file":"map-bad.dat"}
+]"#,
+        )
+        .unwrap();
+        fs::write(
+            assets_dir.join("catalog-content.json-bak"),
+            r#"[
+  {"type":"sprite","file":"sprites-installed.bmp.lzma"},
+  {"type":"map","file":"map-old.dat"}
+]"#,
+        )
+        .unwrap();
+        create_zip(
+            &archive_path,
+            &[
+                ("minimap/Minimap_Color_0_0_7.png", indexed_png_bytes()),
+                (
+                    "assets/catalog-content.json",
+                    br#"[
+  {"type":"sprite","file":"sprites-newer-missing.bmp.lzma"},
+  {"type":"map","file":"map-good.dat"}
+]"#,
+                ),
+                ("assets/map-good.dat", b"good-map".as_slice()),
+            ],
+        );
+
+        install_full_minimap_from_zip(&archive_path, &game_path, None).unwrap();
+
+        let catalog_raw = fs::read_to_string(assets_dir.join("catalog-content.json")).unwrap();
+        let catalog = serde_json::from_str::<serde_json::Value>(&catalog_raw).unwrap();
+        let entries = catalog.as_array().unwrap();
+        assert!(entries.iter().any(|entry| {
+            entry.get("type").and_then(|value| value.as_str()) == Some("sprite")
+                && entry.get("file").and_then(|value| value.as_str())
+                    == Some("sprites-installed.bmp.lzma")
+        }));
+        assert!(!entries.iter().any(|entry| {
+            entry.get("file").and_then(|value| value.as_str())
+                == Some("sprites-newer-missing.bmp.lzma")
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.get("type").and_then(|value| value.as_str()) == Some("map")
+                && entry.get("file").and_then(|value| value.as_str()) == Some("map-good.dat")
+        }));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -928,7 +1347,7 @@ mod tests {
         let game_path = root.join("game");
         create_zip(
             &source_zip,
-            &[("minimap/Minimap_Color_1_2_7.png", b"tile".as_slice())],
+            &[("minimap/Minimap_Color_1_2_7.png", indexed_png_bytes())],
         );
         let zip_bytes = fs::read(&source_zip).unwrap();
         let url = serve_zip_once(zip_bytes).await;
@@ -942,7 +1361,7 @@ mod tests {
         assert_eq!(stats.files, 1);
         assert_eq!(
             fs::read(game_path.join("minimap").join("Minimap_Color_1_2_7.png")).unwrap(),
-            b"tile"
+            indexed_png_bytes()
         );
 
         let _ = fs::remove_dir_all(root);
@@ -957,6 +1376,10 @@ mod tests {
             writer.write_all(contents).unwrap();
         }
         writer.finish().unwrap();
+    }
+
+    fn indexed_png_bytes() -> &'static [u8] {
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x03\x00\x00\x00"
     }
 
     fn temp_dir(prefix: &str) -> PathBuf {

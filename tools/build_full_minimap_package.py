@@ -241,9 +241,47 @@ def encode_png_rgb(width: int, height: int, rgb: bytes) -> bytes:
     )
 
 
+def encode_png_indexed(width: int, height: int, rgb: bytes) -> bytes:
+    if len(rgb) != width * height * 3:
+        raise BuildError("RGB payload size does not match PNG dimensions")
+
+    palette: list[bytes] = []
+    palette_index: dict[bytes, int] = {}
+    indexes = bytearray(width * height)
+    for pixel_offset in range(0, len(rgb), 3):
+        color = rgb[pixel_offset : pixel_offset + 3]
+        index = palette_index.get(color)
+        if index is None:
+            if len(palette) >= 256:
+                raise BuildError("minimap tile has more than 256 colors")
+            index = len(palette)
+            palette_index[color] = index
+            palette.append(color)
+        indexes[pixel_offset // 3] = index
+
+    if not palette:
+        palette.append(b"\x00\x00\x00")
+
+    rows = bytearray()
+    for y in range(height):
+        rows.append(0)
+        start = y * width
+        rows.extend(indexes[start : start + width])
+
+    return b"".join(
+        (
+            b"\x89PNG\r\n\x1a\n",
+            png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 3, 0, 0, 0)),
+            png_chunk(b"PLTE", b"".join(palette)),
+            png_chunk(b"IDAT", zlib.compress(bytes(rows), PNG_COMPRESSION_LEVEL)),
+            png_chunk(b"IEND", b""),
+        )
+    )
+
+
 def build_neutral_waypoint_png() -> bytes:
     waypoint_rgb = b"\x64\x64\x64" * (NORMAL_TILE_SIZE * NORMAL_TILE_SIZE)
-    return encode_png_rgb(NORMAL_TILE_SIZE, NORMAL_TILE_SIZE, waypoint_rgb)
+    return encode_png_indexed(NORMAL_TILE_SIZE, NORMAL_TILE_SIZE, waypoint_rgb)
 
 
 def is_asset_file(path: Path) -> bool:
@@ -413,7 +451,7 @@ def generate_normal_minimap_entries(
     for (base_x, base_y, floor), rgb in sorted(tiles.items()):
         if not any(rgb):
             continue
-        color_png = encode_png_rgb(NORMAL_TILE_SIZE, NORMAL_TILE_SIZE, bytes(rgb))
+        color_png = encode_png_indexed(NORMAL_TILE_SIZE, NORMAL_TILE_SIZE, bytes(rgb))
         color_name = f"minimap/Minimap_Color_{base_x}_{base_y}_{floor}.png"
         waypoint_name = f"minimap/Minimap_WaypointCost_{base_x}_{base_y}_{floor}.png"
         entries[color_name] = color_png
