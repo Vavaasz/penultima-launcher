@@ -62,6 +62,37 @@ function Copy-FullMapAssetFiles {
   return $copied
 }
 
+function Get-FullMinimapZipCounts {
+  param([string]$ZipPath)
+
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  $archive = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
+  try {
+    $minimapCount = 0
+    $assetCount = 0
+    foreach ($entry in $archive.Entries) {
+      if ([string]::IsNullOrWhiteSpace($entry.Name)) {
+        continue
+      }
+
+      $entryName = $entry.FullName.Replace('\', '/')
+      if ($entryName.StartsWith('minimap/', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $minimapCount++
+      } elseif ($entryName.StartsWith('assets/', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $assetCount++
+      }
+    }
+
+    return [ordered]@{
+      Minimap = $minimapCount
+      Assets = $assetCount
+      Total = $minimapCount + $assetCount
+    }
+  } finally {
+    $archive.Dispose()
+  }
+}
+
 if (-not (Test-Path $LauncherRoot)) {
   throw "Launcher root not found: $LauncherRoot"
 }
@@ -83,6 +114,7 @@ $launcherZipPath = Join-Path $downloadsRoot "Penultima-Launcher.zip"
 $launcherReleaseDir = Join-Path (Join-Path (Split-Path -Parent $LauncherRoot) "_publish") "penultima-launcher-release"
 $publishLauncherScript = Join-Path $LauncherRoot "publish-launcher-release.ps1"
 $publishWebsiteClientAssetsScript = Join-Path $ClientRoot "sounds\publish-website-client-assets.ps1"
+$fullMinimapBuilderScript = Join-Path $LauncherRoot "tools\build_full_minimap_package.py"
 $metadataPath = Join-Path $downloadsRoot "penultima-downloads.json"
 $launcherCargoToml = Join-Path $LauncherRoot "Cargo.toml"
 
@@ -138,27 +170,22 @@ if (-not $SkipLauncher) {
 }
 
 if (-not $SkipFullMinimap) {
-  $minimapRoot = Join-Path $ClientRoot "minimap"
-  if (-not (Test-Path -LiteralPath $minimapRoot)) {
-    throw "Client minimap directory not found: $minimapRoot"
+  if (-not (Test-Path -LiteralPath $fullMinimapBuilderScript)) {
+    throw "Full minimap builder not found: $fullMinimapBuilderScript"
   }
 
-  $clientAssetsRoot = Join-Path $ClientRoot "assets"
-  $minimapTempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("penultima-full-minimap-" + [System.Guid]::NewGuid().ToString("N"))
-  $minimapTempPayload = Join-Path $minimapTempRoot "minimap"
-  $assetsTempPayload = Join-Path $minimapTempRoot "assets"
-  New-Item -ItemType Directory -Path $minimapTempPayload -Force | Out-Null
-  New-Item -ItemType Directory -Path $assetsTempPayload -Force | Out-Null
-  Copy-Item -Path (Join-Path $minimapRoot "*") -Destination $minimapTempPayload -Recurse -Force
-  [void](Copy-FullMapAssetFiles -SourceRoot $clientAssetsRoot -DestinationRoot $assetsTempPayload)
-  [void](Copy-FullMapAssetFiles -SourceRoot $WorldRoot -DestinationRoot $assetsTempPayload)
-
-  if (Test-Path -LiteralPath $fullMinimapZipPath) {
-    Remove-Item -LiteralPath $fullMinimapZipPath -Force
+  $pythonCommand = Get-Command python -ErrorAction SilentlyContinue
+  if (-not $pythonCommand) {
+    throw "Python is required to build the full minimap package"
   }
 
-  Compress-Archive -Path (Join-Path $minimapTempRoot "*") -DestinationPath $fullMinimapZipPath -CompressionLevel Optimal -Force
-  Remove-Item -LiteralPath $minimapTempRoot -Recurse -Force
+  & $pythonCommand.Source $fullMinimapBuilderScript `
+    --client-root $ClientRoot `
+    --world-root $WorldRoot `
+    --output $fullMinimapZipPath
+  if ($LASTEXITCODE -ne 0) {
+    throw "Full minimap package build failed with exit code $LASTEXITCODE"
+  }
 }
 
 $launcherExePath = Join-Path $launcherReleaseDir "penultima-launcher.exe"
@@ -214,33 +241,15 @@ if (Test-Path $bootstrapZipPath) {
 
 $fullMinimapMetadata = $null
 if (Test-Path $fullMinimapZipPath) {
-  $minimapRoot = Join-Path $ClientRoot "minimap"
-  $minimapFileCount = if (Test-Path -LiteralPath $minimapRoot) {
-    (Get-ChildItem -LiteralPath $minimapRoot -Recurse -File | Measure-Object).Count
-  } else {
-    0
-  }
-  $clientAssetsRoot = Join-Path $ClientRoot "assets"
-  $assetPatterns = @("minimap-*", "satellite-*", "map-*", "staticdata-*", "staticmapdata-*")
-  $assetNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-  foreach ($sourceRoot in @($clientAssetsRoot, $WorldRoot)) {
-    if (Test-Path -LiteralPath $sourceRoot) {
-      foreach ($pattern in $assetPatterns) {
-        Get-ChildItem -LiteralPath $sourceRoot -File -Filter $pattern -ErrorAction SilentlyContinue | ForEach-Object {
-          [void]$assetNames.Add($_.Name)
-        }
-      }
-    }
-  }
-  $assetFileCount = $assetNames.Count
+  $fullMinimapCounts = Get-FullMinimapZipCounts -ZipPath $fullMinimapZipPath
 
   $fullMinimapMetadata = [ordered]@{
     zip = "downloads/Penultima-Full-Minimap.zip"
     sha256 = (Get-FileHash $fullMinimapZipPath -Algorithm SHA256).Hash
     size = (Get-Item $fullMinimapZipPath).Length
-    file_count = $minimapFileCount + $assetFileCount
-    minimap_file_count = $minimapFileCount
-    asset_file_count = $assetFileCount
+    file_count = $fullMinimapCounts.Total
+    minimap_file_count = $fullMinimapCounts.Minimap
+    asset_file_count = $fullMinimapCounts.Assets
   }
 }
 
