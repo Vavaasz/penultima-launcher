@@ -245,26 +245,54 @@ def encode_png_rgb(width: int, height: int, rgb: bytes) -> bytes:
     )
 
 
-def encode_png_indexed(width: int, height: int, rgb: bytes) -> bytes:
-    if len(rgb) != width * height * 3:
-        raise BuildError("RGB payload size does not match PNG dimensions")
+def automap_palette() -> bytes:
+    palette = bytearray()
+    for index in range(256):
+        if index <= 0 or index >= 216:
+            palette.extend(b"\x00\x00\x00")
+            continue
+        palette.extend(
+            (
+                (index // 36) % 6 * 51,
+                (index // 6) % 6 * 51,
+                index % 6 * 51,
+            )
+        )
+    return bytes(palette)
 
-    palette: list[bytes] = []
-    palette_index: dict[bytes, int] = {}
+
+AUTOMAP_PALETTE = automap_palette()
+
+
+def rgb_to_automap_index(red: int, green: int, blue: int) -> int:
+    red_index = max(0, min(5, (red + 25) // 51))
+    green_index = max(0, min(5, (green + 25) // 51))
+    blue_index = max(0, min(5, (blue + 25) // 51))
+    index = red_index * 36 + green_index * 6 + blue_index
+    if index <= 0 or index >= 216:
+        return 0
+    return index
+
+
+def rgb_to_automap_indexes(width: int, height: int, rgb: bytes) -> bytes:
+    if len(rgb) != width * height * 3:
+        raise BuildError("RGB payload size does not match minimap dimensions")
+
+    color_cache: dict[bytes, int] = {}
     indexes = bytearray(width * height)
     for pixel_offset in range(0, len(rgb), 3):
         color = rgb[pixel_offset : pixel_offset + 3]
-        index = palette_index.get(color)
+        index = color_cache.get(color)
         if index is None:
-            if len(palette) >= 256:
-                raise BuildError("minimap tile has more than 256 colors")
-            index = len(palette)
-            palette_index[color] = index
-            palette.append(color)
+            index = rgb_to_automap_index(color[0], color[1], color[2])
+            color_cache[color] = index
         indexes[pixel_offset // 3] = index
+    return bytes(indexes)
 
-    if not palette:
-        palette.append(b"\x00\x00\x00")
+
+def encode_png_indexed(width: int, height: int, indexes: bytes) -> bytes:
+    if len(indexes) != width * height:
+        raise BuildError("indexed minimap payload size does not match PNG dimensions")
 
     rows = bytearray()
     for y in range(height):
@@ -276,7 +304,7 @@ def encode_png_indexed(width: int, height: int, rgb: bytes) -> bytes:
         (
             b"\x89PNG\r\n\x1a\n",
             png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 3, 0, 0, 0)),
-            png_chunk(b"PLTE", b"".join(palette)),
+            png_chunk(b"PLTE", AUTOMAP_PALETTE),
             png_chunk(b"IDAT", zlib.compress(bytes(rows), PNG_COMPRESSION_LEVEL)),
             png_chunk(b"IEND", b""),
         )
@@ -373,7 +401,8 @@ def tile_key(world_x: int, world_y: int, floor: int) -> tuple[int, int, int]:
 
 
 def decode_minimap_asset(path: Path) -> tuple[int, int, bytes]:
-    return decode_bmp_rgb(decode_cip_lzma_asset(path))
+    width, height, rgb = decode_bmp_rgb(decode_cip_lzma_asset(path))
+    return width, height, rgb_to_automap_indexes(width, height, rgb)
 
 
 def merge_minimap_asset_into_tiles(
@@ -394,7 +423,7 @@ def merge_minimap_asset_into_tiles(
     ):
         return
 
-    image_width, image_height, rgb = decode_minimap_asset(asset_path)
+    image_width, image_height, indexes = decode_minimap_asset(asset_path)
     usable_width = min(image_width, width_square if width_square > 0 else image_width)
     usable_height = min(image_height, height_square if height_square > 0 else image_height)
     if usable_width <= 0 or usable_height <= 0:
@@ -403,20 +432,18 @@ def merge_minimap_asset_into_tiles(
     start_x, start_y, floor = (int(top_left[0]), int(top_left[1]), int(top_left[2]))
     for source_y in range(usable_height):
         world_y = start_y + source_y
-        row_offset = source_y * image_width * 3
         source_x = 0
         while source_x < usable_width:
             world_x = start_x + source_x
             key = tile_key(world_x, world_y, floor)
-            tile = tiles.setdefault(key, bytearray(NORMAL_TILE_SIZE * NORMAL_TILE_SIZE * 3))
+            tile = tiles.setdefault(key, bytearray(NORMAL_TILE_SIZE * NORMAL_TILE_SIZE))
             target_x = world_x - key[0]
             target_y = world_y - key[1]
             span = min(usable_width - source_x, NORMAL_TILE_SIZE - target_x)
-            source_offset = row_offset + source_x * 3
-            target_offset = (target_y * NORMAL_TILE_SIZE + target_x) * 3
-            byte_count = span * 3
-            tile[target_offset : target_offset + byte_count] = rgb[
-                source_offset : source_offset + byte_count
+            source_offset = source_y * image_width + source_x
+            target_offset = target_y * NORMAL_TILE_SIZE + target_x
+            tile[target_offset : target_offset + span] = indexes[
+                source_offset : source_offset + span
             ]
             source_x += span
 
@@ -446,10 +473,10 @@ def generate_normal_minimap_entries(
                     processed_assets += 1
 
     generated_tiles = 0
-    for (base_x, base_y, floor), rgb in sorted(tiles.items()):
-        if not any(rgb):
+    for (base_x, base_y, floor), indexes in sorted(tiles.items()):
+        if not any(indexes):
             continue
-        color_png = encode_png_indexed(NORMAL_TILE_SIZE, NORMAL_TILE_SIZE, bytes(rgb))
+        color_png = encode_png_indexed(NORMAL_TILE_SIZE, NORMAL_TILE_SIZE, bytes(indexes))
         color_name = f"minimap/Minimap_Color_{base_x}_{base_y}_{floor}.png"
         entries[color_name] = color_png
         generated_tiles += 1
