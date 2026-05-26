@@ -15,11 +15,12 @@ use crate::message_system::LauncherMessage;
 use crate::website_status::{EventSummary, OfferPreview, OfferSummary};
 
 const TOP_STATUS_CARD_HEIGHT: f32 = 248.0;
-const PREVIEW_REPAINT_MIN_MS: u32 = 70;
-const PREVIEW_REPAINT_MAX_MS: u32 = 160;
-const SPLASH_REPAINT_MS: u64 = 80;
-const STATUS_REPAINT_MS: u64 = 350;
-const BACKGROUND_REPAINT_MS: u64 = 100;
+const PREVIEW_REPAINT_MIN_MS: u32 = 32;
+const PREVIEW_REPAINT_MAX_MS: u32 = 96;
+const SPLASH_REPAINT_MS: u64 = 16;
+const STATUS_REPAINT_MS: u64 = 33;
+const BACKGROUND_REPAINT_MS: u64 = 33;
+const PLACEHOLDER_MOTION_REPAINT_MS: u64 = 16;
 
 fn preview_repaint_delay_ms(delay_ms: u32) -> u64 {
     delay_ms.clamp(PREVIEW_REPAINT_MIN_MS, PREVIEW_REPAINT_MAX_MS) as u64
@@ -767,10 +768,21 @@ impl GameLauncher {
 
             if let Some(frame) = self.current_boosted_preview_frame(kind, ui.ctx()) {
                 let texture_size = frame.texture.size_vec2();
-                let scale =
+                let mut scale =
                     (preview_size.x / texture_size.x).min(preview_size.y / texture_size.y) * 0.92;
+                let mut center = rect.center();
+                let is_placeholder_motion = self.boosted_preview_is_loading(kind)
+                    && !self.boosted_preview_is_animated(kind);
+                if is_placeholder_motion {
+                    let time = ui.input(|input| input.time) as f32;
+                    center.y += (time * 4.6).sin() * 3.0;
+                    scale *= 0.97 + ((time * 5.2).sin() * 0.5 + 0.5) * 0.05;
+                    ui.ctx().request_repaint_after(Duration::from_millis(
+                        PLACEHOLDER_MOTION_REPAINT_MS,
+                    ));
+                }
                 let image_size = texture_size * scale;
-                let image_rect = egui::Rect::from_center_size(rect.center(), image_size);
+                let image_rect = egui::Rect::from_center_size(center, image_size);
                 ui.painter().image(
                     frame.texture.id(),
                     image_rect,

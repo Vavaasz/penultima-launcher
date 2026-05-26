@@ -192,7 +192,7 @@ pub const HIDDEN_REPAINT_INTERVAL: Duration = Duration::from_secs(2);
 pub const TRAY_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 /// Intervalo de repaint quando a janela está visível mas ociosa
-pub const IDLE_REPAINT_INTERVAL: Duration = Duration::from_millis(1000);
+pub const IDLE_REPAINT_INTERVAL: Duration = Duration::from_millis(33);
 
 /// Duração mínima entre exibições de mensagens
 pub const MESSAGE_DISPLAY_INTERVAL: Duration = Duration::from_secs(2);

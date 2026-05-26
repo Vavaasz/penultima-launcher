@@ -50,7 +50,8 @@ use website_status::WebsiteStatus;
 use window_manager::WindowManager;
 
 const MAX_CONCURRENT_OFFER_PREVIEWS: usize = 2;
-const BOOSTED_ANIMATED_PREVIEW_FRAMES: usize = 4;
+const BOOSTED_FAST_ANIMATED_PREVIEW_FRAMES: usize = 4;
+const BOOSTED_FULL_ANIMATED_PREVIEW_FRAMES: usize = 8;
 const CLIENTS_TRAY_SYNC_INTERVAL: Duration = Duration::from_millis(1000);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -453,15 +454,19 @@ impl GameLauncher {
                 });
             }
 
-            let animated_url = website_status::bounded_animated_sprite_preview_url(
+            let fast_animated_url = website_status::bounded_animated_sprite_preview_url(
                 &url,
-                BOOSTED_ANIMATED_PREVIEW_FRAMES,
+                BOOSTED_FAST_ANIMATED_PREVIEW_FRAMES,
+            );
+            let full_animated_url = website_status::bounded_animated_sprite_preview_url(
+                &url,
+                BOOSTED_FULL_ANIMATED_PREVIEW_FRAMES,
             );
             tokio::spawn(async move {
                 match boosted_preview::fetch_boosted_preview_cached_as(
-                    animated_url,
+                    fast_animated_url,
                     url.clone(),
-                    preview_cache_dir,
+                    preview_cache_dir.clone(),
                 )
                 .await
                 {
@@ -469,8 +474,30 @@ impl GameLauncher {
                         let _ = sender.send(LauncherMessage::BoostedPreviewLoaded(
                             kind,
                             preview,
-                            BoostedPreviewLoadPhase::Animated,
+                            BoostedPreviewLoadPhase::FastAnimated,
                         ));
+
+                        match boosted_preview::fetch_boosted_preview_cached_as(
+                            full_animated_url,
+                            url,
+                            preview_cache_dir,
+                        )
+                        .await
+                        {
+                            Ok(preview) => {
+                                let _ = sender.send(LauncherMessage::BoostedPreviewLoaded(
+                                    kind,
+                                    preview,
+                                    BoostedPreviewLoadPhase::FullAnimated,
+                                ));
+                            }
+                            Err(error) => {
+                                info!(
+                                    "Falha ao carregar preview animado completo {:?}: {:#}",
+                                    kind, error
+                                );
+                            }
+                        }
                     }
                     Err(error) => {
                         let _ = sender.send(LauncherMessage::BoostedPreviewError(
@@ -608,7 +635,10 @@ impl GameLauncher {
         preview: BoostedPreviewData,
         phase: BoostedPreviewLoadPhase,
     ) {
-        if self.boosted_preview_loading_url(kind) != Some(preview.url.as_str()) {
+        let loading_matches = self.boosted_preview_loading_url(kind) == Some(preview.url.as_str());
+        let replacing_current_animation = phase == BoostedPreviewLoadPhase::FullAnimated
+            && self.boosted_preview_url(kind).as_deref() == Some(preview.url.as_str());
+        if !loading_matches && !replacing_current_animation {
             return;
         }
 
@@ -631,7 +661,7 @@ impl GameLauncher {
             BoostedPreviewKind::Boss => self.boosted_boss_preview = Some(texture),
         }
 
-        if phase == BoostedPreviewLoadPhase::Animated {
+        if phase != BoostedPreviewLoadPhase::StaticPlaceholder {
             self.set_boosted_preview_loading(kind, None);
         }
         self.set_boosted_preview_error(kind, None);

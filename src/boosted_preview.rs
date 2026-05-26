@@ -27,7 +27,8 @@ pub enum BoostedPreviewKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BoostedPreviewLoadPhase {
     StaticPlaceholder,
-    Animated,
+    FastAnimated,
+    FullAnimated,
 }
 
 #[derive(Debug, Clone)]
