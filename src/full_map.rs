@@ -843,7 +843,7 @@ fn write_atomic_bytes(destination: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 fn is_client_minimap_file(filename: &str) -> bool {
-    is_client_minimap_color_file(filename) || is_client_waypoint_cost_file(filename)
+    is_client_minimap_color_file(filename)
 }
 
 fn is_client_minimap_color_file(filename: &str) -> bool {
@@ -927,7 +927,7 @@ fn cleanup_stale_full_map_minimap(
         let path = entry.path();
         let filename = entry.file_name().to_string_lossy().to_ascii_lowercase();
         if is_client_waypoint_cost_file(&filename) {
-            if matches!(is_broken_waypoint_cost_file(&path), Ok(true)) {
+            if matches!(is_stale_waypoint_cost_file(&path), Ok(true)) {
                 fs::remove_file(&path).with_context(|| {
                     format!("Falha ao remover waypoint-cost invalido {}", path.display())
                 })?;
@@ -947,12 +947,12 @@ fn cleanup_stale_full_map_minimap(
     Ok(())
 }
 
-fn is_broken_waypoint_cost_file(path: &Path) -> Result<bool> {
+fn is_stale_waypoint_cost_file(path: &Path) -> Result<bool> {
     let data = fs::read(path).with_context(|| format!("Falha ao ler {}", path.display()))?;
-    Ok(classify_broken_waypoint_cost_png(&data).unwrap_or(false))
+    Ok(classify_stale_waypoint_cost_png(&data).unwrap_or(false))
 }
 
-fn classify_broken_waypoint_cost_png(data: &[u8]) -> Option<bool> {
+fn classify_stale_waypoint_cost_png(data: &[u8]) -> Option<bool> {
     if !data.starts_with(b"\x89PNG\r\n\x1a\n") {
         return Some(false);
     }
@@ -1011,10 +1011,14 @@ fn classify_broken_waypoint_cost_png(data: &[u8]) -> Option<bool> {
         return None;
     }
 
-    indexed_png_scanlines_are_all_zero(width as usize, height as usize, &decoded)
+    indexed_png_scanlines_are_stale_waypoint_costs(width as usize, height as usize, &decoded)
 }
 
-fn indexed_png_scanlines_are_all_zero(width: usize, height: usize, decoded: &[u8]) -> Option<bool> {
+fn indexed_png_scanlines_are_stale_waypoint_costs(
+    width: usize,
+    height: usize,
+    decoded: &[u8],
+) -> Option<bool> {
     let row_size = width.checked_add(1)?;
     let expected_size = row_size.checked_mul(height)?;
     if decoded.len() < expected_size {
@@ -1024,6 +1028,7 @@ fn indexed_png_scanlines_are_all_zero(width: usize, height: usize, decoded: &[u8
     let mut previous = vec![0u8; width];
     let mut current = vec![0u8; width];
     let mut all_zero = true;
+    let mut only_generated_costs = true;
 
     for y in 0..height {
         let row_offset = y.checked_mul(row_size)?;
@@ -1046,12 +1051,15 @@ fn indexed_png_scanlines_are_all_zero(width: usize, height: usize, decoded: &[u8
             if current[x] != 0 {
                 all_zero = false;
             }
+            if current[x] != 100 && current[x] != 254 {
+                only_generated_costs = false;
+            }
         }
 
         previous.copy_from_slice(&current);
     }
 
-    Some(all_zero)
+    Some(all_zero || only_generated_costs)
 }
 
 fn paeth_predictor(left: u8, up: u8, upper_left: u8) -> u8 {
@@ -1161,10 +1169,7 @@ mod tests {
         );
         assert_eq!(
             full_map_archive_path("minimap/Minimap_WaypointCost_0_0_7.png"),
-            Some((
-                FullMapInstallRoot::Minimap,
-                PathBuf::from("Minimap_WaypointCost_0_0_7.png")
-            ))
+            None
         );
     }
 
@@ -1255,7 +1260,12 @@ mod tests {
         .unwrap();
         fs::write(
             minimap_dir.join("Minimap_WaypointCost_keep.png"),
-            waypoint_cost_png(1),
+            waypoint_cost_png(150),
+        )
+        .unwrap();
+        fs::write(
+            minimap_dir.join("Minimap_WaypointCost_synthetic.png"),
+            waypoint_cost_png(100),
         )
         .unwrap();
         fs::write(minimap_dir.join("notes.txt"), b"keep").unwrap();
@@ -1265,15 +1275,10 @@ mod tests {
         fs::write(assets_dir.join("satellite-bad.bmp.lzma"), b"bad-satellite").unwrap();
         fs::write(assets_dir.join("subarea-bad.bmp.lzma"), b"bad-subarea").unwrap();
         fs::write(assets_dir.join("custom.txt"), b"keep").unwrap();
-        let waypoint_entry = waypoint_cost_png(1);
         create_zip(
             &archive_path,
             &[
                 ("minimap/Minimap_Color_0_0_7.png", indexed_png_bytes()),
-                (
-                    "minimap/Minimap_WaypointCost_0_0_7.png",
-                    waypoint_entry.as_slice(),
-                ),
                 (
                     "assets/minimap-32-0001-0002-07-hash.bmp.lzma",
                     b"asset-minimap".as_slice(),
@@ -1288,19 +1293,10 @@ mod tests {
 
         let stats = install_full_minimap_from_zip(&archive_path, &game_path, None).unwrap();
 
-        assert_eq!(stats.files, 7);
+        assert_eq!(stats.files, 6);
         assert_eq!(
             fs::read(game_path.join("minimap").join("Minimap_Color_0_0_7.png")).unwrap(),
             indexed_png_bytes()
-        );
-        assert_eq!(
-            fs::read(
-                game_path
-                    .join("minimap")
-                    .join("Minimap_WaypointCost_0_0_7.png")
-            )
-            .unwrap(),
-            waypoint_cost_png(1)
         );
         assert_eq!(
             fs::read(
@@ -1369,6 +1365,12 @@ mod tests {
                 .join("Minimap_WaypointCost_keep.png")
                 .exists()
         );
+        assert!(
+            !game_path
+                .join("minimap")
+                .join("Minimap_WaypointCost_synthetic.png")
+                .exists()
+        );
         assert_eq!(
             fs::read(game_path.join("minimap").join("notes.txt")).unwrap(),
             b"keep"
@@ -1390,12 +1392,17 @@ mod tests {
         fs::write(assets_dir.join("map-existing.dat"), b"keep-map").unwrap();
         fs::write(
             minimap_dir.join("Minimap_WaypointCost_keep.png"),
-            waypoint_cost_png(1),
+            waypoint_cost_png(150),
         )
         .unwrap();
         fs::write(
             minimap_dir.join("Minimap_WaypointCost_bad.png"),
             waypoint_cost_png(0),
+        )
+        .unwrap();
+        fs::write(
+            minimap_dir.join("Minimap_WaypointCost_synthetic.png"),
+            waypoint_cost_png(100),
         )
         .unwrap();
         create_zip(
@@ -1411,6 +1418,11 @@ mod tests {
         );
         assert!(minimap_dir.join("Minimap_WaypointCost_keep.png").exists());
         assert!(!minimap_dir.join("Minimap_WaypointCost_bad.png").exists());
+        assert!(
+            !minimap_dir
+                .join("Minimap_WaypointCost_synthetic.png")
+                .exists()
+        );
 
         let _ = fs::remove_dir_all(root);
     }

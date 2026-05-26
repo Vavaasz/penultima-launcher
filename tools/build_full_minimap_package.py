@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """Build the launcher full minimap package from client and server map assets.
 
-The client needs ``minimap/Minimap_Color_*`` for the normal automap reveal and
-``Minimap_WaypointCost_*`` for mouse/autowalk costs. Those files are the same
-cache surface the client populates as players walk around.
+The client needs ``minimap/Minimap_Color_*`` for the normal automap reveal. That
+is the same visual cache surface the client populates as players walk around.
 
 The Cyclopedia ``map-*.dat`` protobuf already contains exact top-left
 coordinates for each ``minimap-32`` asset. This script decodes those assets and
 splits them into the 256x256 normal automap PNG tiles consumed by the client.
 
-Waypoint-cost PNGs must store the cost as the pixel index itself. Writing a
-normal palette with arbitrary indexes can make mouse movement impossible even
-when keyboard movement still works.
+Do not generate ``Minimap_WaypointCost_*`` files. The client uses those files
+for mouse pathing/click movement and writes valid values as the player explores.
+Fake waypoint costs can make mouse movement impossible even when keyboard
+movement still works.
 
 Do not publish generated server Cyclopedia assets through this package. The
 15.23 client treats those assets as startup-critical, and a mismatched catalog,
@@ -45,7 +45,7 @@ WORLD_PACKAGE_ASSET_PREFIXES = (
     "minimap-",
     "satellite-",
 )
-CLIENT_MINIMAP_RE = re.compile(r"^Minimap_(?:Color|WaypointCost)_\d+_\d+_\d+\.png$", re.I)
+CLIENT_MINIMAP_RE = re.compile(r"^Minimap_Color_\d+_\d+_\d+\.png$", re.I)
 CIP_LZMA_SIGNATURE_PREFIX = bytes((0x70, 0x0A, 0xFA, 0x80))
 CIP_LZMA_MARKER_SIZE = 5
 CIP_HEADER_SIZE = 32
@@ -53,8 +53,6 @@ NORMAL_TILE_SIZE = 256
 MINIMAP_ASSET_TYPE = 2
 FULL_RES_MINIMAP_SCALE = 1.0 / 32.0
 PNG_COMPRESSION_LEVEL = 6
-WAYPOINT_DEFAULT_COST_INDEX = 100
-WAYPOINT_UNKNOWN_INDEX = 254
 
 
 class BuildError(RuntimeError):
@@ -265,21 +263,6 @@ def automap_palette() -> bytes:
 AUTOMAP_PALETTE = automap_palette()
 
 
-def waypoint_palette() -> bytes:
-    palette = bytearray()
-    for index in range(256):
-        if index == WAYPOINT_UNKNOWN_INDEX:
-            palette.extend((255, 0, 255))
-        elif index == 255:
-            palette.extend((255, 255, 0))
-        else:
-            palette.extend((index, index, index))
-    return bytes(palette)
-
-
-WAYPOINT_PALETTE = waypoint_palette()
-
-
 def rgb_to_automap_index(red: int, green: int, blue: int) -> int:
     red_index = max(0, min(5, (red + 25) // 51))
     green_index = max(0, min(5, (green + 25) // 51))
@@ -327,15 +310,6 @@ def encode_png_indexed(width: int, height: int, indexes: bytes, palette: bytes) 
             png_chunk(b"IEND", b""),
         )
     )
-
-
-def build_waypoint_indexes(color_indexes: bytes) -> bytes:
-    waypoint_indexes = bytearray(len(color_indexes))
-    for index, color_index in enumerate(color_indexes):
-        waypoint_indexes[index] = (
-            WAYPOINT_DEFAULT_COST_INDEX if color_index else WAYPOINT_UNKNOWN_INDEX
-        )
-    return bytes(waypoint_indexes)
 
 
 def is_asset_file(path: Path) -> bool:
@@ -507,16 +481,8 @@ def generate_normal_minimap_entries(
         color_png = encode_png_indexed(
             NORMAL_TILE_SIZE, NORMAL_TILE_SIZE, tile_indexes, AUTOMAP_PALETTE
         )
-        waypoint_png = encode_png_indexed(
-            NORMAL_TILE_SIZE,
-            NORMAL_TILE_SIZE,
-            build_waypoint_indexes(tile_indexes),
-            WAYPOINT_PALETTE,
-        )
         color_name = f"minimap/Minimap_Color_{base_x}_{base_y}_{floor}.png"
-        waypoint_name = f"minimap/Minimap_WaypointCost_{base_x}_{base_y}_{floor}.png"
         entries[color_name] = color_png
-        entries[waypoint_name] = waypoint_png
         generated_tiles += 1
 
     if generated_tiles == 0:
@@ -526,7 +492,7 @@ def generate_normal_minimap_entries(
         f"Generated {generated_tiles} normal minimap color tiles "
         f"from {processed_assets} Cyclopedia minimap assets."
     )
-    return generated_tiles * 2
+    return generated_tiles
 
 
 def write_zip(output_path: Path, entries: dict[str, bytes | Path]) -> None:
