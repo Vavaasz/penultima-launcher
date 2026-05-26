@@ -4,12 +4,15 @@
 The client needs two map surfaces:
 - ``minimap/Minimap_Color_*`` and ``Minimap_WaypointCost_*`` for the normal
   automap.
-- ``assets/map-*``, ``assets/minimap-*``, ``assets/satellite-*`` and static
-  data files for the Cyclopedia/custom map.
+- Original ``assets`` map/catalog files restored from the current client feed.
 
 The Cyclopedia ``map-*.dat`` protobuf already contains exact top-left
 coordinates for each ``minimap-32`` asset. This script decodes those assets and
 splits them into the 256x256 normal automap PNG tiles consumed by the client.
+
+Do not publish generated server Cyclopedia assets through this package. The
+15.23 client treats those assets as startup-critical, and a mismatched catalog,
+map, staticdata, or staticmapdata file can prevent the client from opening.
 """
 
 from __future__ import annotations
@@ -450,7 +453,6 @@ def build_package(client_root: Path, world_root: Path, output_path: Path) -> Non
     add_existing_client_minimap(client_root, entries)
     generated_minimap_files = generate_normal_minimap_entries(source_roots, asset_files, entries)
     add_client_map_assets(client_assets_root, entries)
-    add_world_map_assets(world_root, client_assets_root, entries)
 
     write_zip(output_path, entries)
 

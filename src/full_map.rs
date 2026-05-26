@@ -660,7 +660,10 @@ fn cleanup_stale_full_map_assets(assets_dir: &Path, entries: &[FullMapArchiveEnt
 }
 
 fn is_cleanup_candidate_asset(filename: &str) -> bool {
-    (filename.starts_with("map-") && filename.ends_with(".dat"))
+    (filename.starts_with("subarea-") && filename.ends_with(".bmp.lzma"))
+        || (filename.starts_with("minimap-") && filename.ends_with(".bmp.lzma"))
+        || (filename.starts_with("satellite-") && filename.ends_with(".bmp.lzma"))
+        || (filename.starts_with("map-") && filename.ends_with(".dat"))
         || (filename.starts_with("staticdata-")
             && (filename.ends_with(".dat") || filename.ends_with(".dat.lzma")))
         || (filename.starts_with("staticmapdata-")
@@ -823,6 +826,9 @@ mod tests {
         fs::create_dir_all(&assets_dir).unwrap();
         fs::write(assets_dir.join("map-bad.dat"), b"bad-map").unwrap();
         fs::write(assets_dir.join("staticdata-bad.dat"), b"bad-static").unwrap();
+        fs::write(assets_dir.join("minimap-bad.bmp.lzma"), b"bad-minimap").unwrap();
+        fs::write(assets_dir.join("satellite-bad.bmp.lzma"), b"bad-satellite").unwrap();
+        fs::write(assets_dir.join("subarea-bad.bmp.lzma"), b"bad-subarea").unwrap();
         fs::write(assets_dir.join("custom.txt"), b"keep").unwrap();
         create_zip(
             &archive_path,
@@ -887,6 +893,24 @@ mod tests {
         );
         assert!(!game_path.join("assets").join("map-bad.dat").exists());
         assert!(!game_path.join("assets").join("staticdata-bad.dat").exists());
+        assert!(
+            !game_path
+                .join("assets")
+                .join("minimap-bad.bmp.lzma")
+                .exists()
+        );
+        assert!(
+            !game_path
+                .join("assets")
+                .join("satellite-bad.bmp.lzma")
+                .exists()
+        );
+        assert!(
+            !game_path
+                .join("assets")
+                .join("subarea-bad.bmp.lzma")
+                .exists()
+        );
         assert_eq!(
             fs::read(game_path.join("assets").join("custom.txt")).unwrap(),
             b"keep"
