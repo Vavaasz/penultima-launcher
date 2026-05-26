@@ -227,6 +227,7 @@ pub fn install_full_minimap_from_zip(
         .with_context(|| format!("Nao foi possivel criar {}", minimap_dir.display()))?;
     fs::create_dir_all(&assets_dir)
         .with_context(|| format!("Nao foi possivel criar {}", assets_dir.display()))?;
+    cleanup_stale_full_map_assets(&assets_dir, &entries)?;
 
     let mut created_directories = HashSet::new();
     let mut extracted_files = 0usize;
@@ -616,11 +617,54 @@ fn is_client_minimap_file(filename: &str) -> bool {
 
 fn is_asset_map_file(filename: &str) -> bool {
     let lower = filename.to_ascii_lowercase();
-    lower.starts_with("minimap-")
+    lower == "catalog-content.json"
+        || lower.starts_with("subarea-")
+        || lower.starts_with("minimap-")
         || lower.starts_with("satellite-")
         || lower.starts_with("map-")
         || lower.starts_with("staticdata-")
         || lower.starts_with("staticmapdata-")
+}
+
+fn cleanup_stale_full_map_assets(assets_dir: &Path, entries: &[FullMapArchiveEntry]) -> Result<()> {
+    if !assets_dir.exists() {
+        return Ok(());
+    }
+
+    let archive_asset_filenames: HashSet<String> = entries
+        .iter()
+        .filter(|entry| entry.root == FullMapInstallRoot::Assets)
+        .filter_map(|entry| entry.relative_path.file_name())
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .collect();
+
+    for entry in fs::read_dir(assets_dir)
+        .with_context(|| format!("Falha ao listar {}", assets_dir.display()))?
+    {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if !file_type.is_file() {
+            continue;
+        }
+
+        let filename = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        if !is_cleanup_candidate_asset(&filename) || archive_asset_filenames.contains(&filename) {
+            continue;
+        }
+
+        fs::remove_file(entry.path())
+            .with_context(|| format!("Falha ao remover asset antigo {}", entry.path().display()))?;
+    }
+
+    Ok(())
+}
+
+fn is_cleanup_candidate_asset(filename: &str) -> bool {
+    (filename.starts_with("map-") && filename.ends_with(".dat"))
+        || (filename.starts_with("staticdata-")
+            && (filename.ends_with(".dat") || filename.ends_with(".dat.lzma")))
+        || (filename.starts_with("staticmapdata-")
+            && (filename.ends_with(".dat") || filename.ends_with(".dat.lzma")))
 }
 
 fn replace_file(source: &Path, destination: &Path) -> Result<()> {
@@ -716,6 +760,20 @@ mod tests {
                 PathBuf::from("staticmapdata-hash.dat")
             ))
         );
+        assert_eq!(
+            full_map_archive_path("assets/subarea-0001-hash.bmp.lzma"),
+            Some((
+                FullMapInstallRoot::Assets,
+                PathBuf::from("subarea-0001-hash.bmp.lzma")
+            ))
+        );
+        assert_eq!(
+            full_map_archive_path("assets/catalog-content.json"),
+            Some((
+                FullMapInstallRoot::Assets,
+                PathBuf::from("catalog-content.json")
+            ))
+        );
     }
 
     #[test]
@@ -761,6 +819,11 @@ mod tests {
         let root = temp_dir("full-minimap-install");
         let archive_path = root.join("map.zip");
         let game_path = root.join("game");
+        let assets_dir = game_path.join("assets");
+        fs::create_dir_all(&assets_dir).unwrap();
+        fs::write(assets_dir.join("map-bad.dat"), b"bad-map").unwrap();
+        fs::write(assets_dir.join("staticdata-bad.dat"), b"bad-static").unwrap();
+        fs::write(assets_dir.join("custom.txt"), b"keep").unwrap();
         create_zip(
             &archive_path,
             &[
@@ -773,14 +836,17 @@ mod tests {
                     "assets/minimap-32-0001-0002-07-hash.bmp.lzma",
                     b"asset-minimap".as_slice(),
                 ),
-                ("staticmapdata-hash.dat", b"static".as_slice()),
+                ("assets/map-good.dat", b"good-map".as_slice()),
+                ("assets/staticdata-good.dat", b"good-static".as_slice()),
+                ("assets/catalog-content.json", b"catalog".as_slice()),
+                ("staticmapdata-hash.dat", b"static-map".as_slice()),
                 ("../escape.txt", b"escape".as_slice()),
             ],
         );
 
         let stats = install_full_minimap_from_zip(&archive_path, &game_path, None).unwrap();
 
-        assert_eq!(stats.files, 4);
+        assert_eq!(stats.files, 7);
         assert_eq!(
             fs::read(game_path.join("minimap").join("Minimap_Color_0_0_7.png")).unwrap(),
             b"color"
@@ -805,7 +871,25 @@ mod tests {
         );
         assert_eq!(
             fs::read(game_path.join("assets").join("staticmapdata-hash.dat")).unwrap(),
-            b"static"
+            b"static-map"
+        );
+        assert_eq!(
+            fs::read(game_path.join("assets").join("map-good.dat")).unwrap(),
+            b"good-map"
+        );
+        assert_eq!(
+            fs::read(game_path.join("assets").join("staticdata-good.dat")).unwrap(),
+            b"good-static"
+        );
+        assert_eq!(
+            fs::read(game_path.join("assets").join("catalog-content.json")).unwrap(),
+            b"catalog"
+        );
+        assert!(!game_path.join("assets").join("map-bad.dat").exists());
+        assert!(!game_path.join("assets").join("staticdata-bad.dat").exists());
+        assert_eq!(
+            fs::read(game_path.join("assets").join("custom.txt")).unwrap(),
+            b"keep"
         );
         assert!(!game_path.join("escape.txt").exists());
 

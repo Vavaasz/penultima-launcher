@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import argparse
 import binascii
+import hashlib
+import json
 import lzma
 import re
 import struct
@@ -26,11 +28,16 @@ from pathlib import Path
 
 
 ASSET_PREFIXES = (
+    "subarea-",
     "minimap-",
     "satellite-",
     "map-",
     "staticdata-",
     "staticmapdata-",
+)
+WORLD_PACKAGE_ASSET_PREFIXES = (
+    "minimap-",
+    "satellite-",
 )
 CLIENT_MINIMAP_RE = re.compile(r"^Minimap_(?:Color|WaypointCost)_\d+_\d+_\d+\.png$", re.I)
 CIP_LZMA_SIGNATURE_PREFIX = bytes((0x70, 0x0A, 0xFA, 0x80))
@@ -248,7 +255,7 @@ def collect_asset_files(source_roots: list[Path]) -> dict[str, Path]:
             continue
         for path in root.iterdir():
             if path.is_file() and is_asset_file(path):
-                assets[path.name] = path
+                assets.setdefault(path.name, path)
     return assets
 
 
@@ -259,6 +266,62 @@ def add_existing_client_minimap(client_root: Path, entries: dict[str, bytes | Pa
     for path in minimap_root.rglob("*"):
         if path.is_file() and CLIENT_MINIMAP_RE.match(path.name):
             entries[f"minimap/{path.name}"] = path
+
+
+def add_client_map_assets(client_assets_root: Path, entries: dict[str, bytes | Path]) -> None:
+    if not client_assets_root.exists():
+        return
+    for path in sorted(client_assets_root.iterdir()):
+        if path.is_file() and (is_asset_file(path) or path.name.lower() == "catalog-content.json"):
+            entries[f"assets/{path.name}"] = path
+
+
+def find_world_map_data_path(world_root: Path) -> Path | None:
+    if not world_root.exists():
+        return None
+    map_paths = sorted(world_root.glob("map-*.dat"), key=lambda path: path.stat().st_mtime, reverse=True)
+    return map_paths[0] if map_paths else None
+
+
+def canonical_map_data_filename(data: bytes) -> str:
+    return f"map-{hashlib.sha256(data).hexdigest()}.dat"
+
+
+def patch_catalog_map_entry(client_assets_root: Path, map_filename: str, entries: dict[str, bytes | Path]) -> None:
+    catalog_path = client_assets_root / "catalog-content.json"
+    if not catalog_path.exists():
+        return
+
+    catalog = json.loads(catalog_path.read_text(encoding="utf-8-sig"))
+    patched = False
+    if isinstance(catalog, list):
+        for item in catalog:
+            if isinstance(item, dict) and item.get("type") == "map":
+                item["file"] = map_filename
+                patched = True
+    if not patched:
+        catalog.append({"type": "map", "file": map_filename})
+
+    entries["assets/catalog-content.json"] = (
+        json.dumps(catalog, indent=2, ensure_ascii=False) + "\n"
+    ).encode("utf-8")
+
+
+def add_world_map_assets(world_root: Path, client_assets_root: Path, entries: dict[str, bytes | Path]) -> None:
+    world_map_path = find_world_map_data_path(world_root)
+    if world_map_path:
+        world_map_data = world_map_path.read_bytes()
+        world_map_filename = canonical_map_data_filename(world_map_data)
+        entries[f"assets/{world_map_filename}"] = world_map_data
+        patch_catalog_map_entry(client_assets_root, world_map_filename, entries)
+
+    if not world_root.exists():
+        return
+    for path in sorted(world_root.iterdir()):
+        lower_name = path.name.lower()
+        if not path.is_file() or not lower_name.startswith(WORLD_PACKAGE_ASSET_PREFIXES):
+            continue
+        entries.setdefault(f"assets/{path.name}", path)
 
 
 def tile_key(world_x: int, world_y: int, floor: int) -> tuple[int, int, int]:
@@ -386,9 +449,8 @@ def build_package(client_root: Path, world_root: Path, output_path: Path) -> Non
     entries: dict[str, bytes | Path] = {}
     add_existing_client_minimap(client_root, entries)
     generated_minimap_files = generate_normal_minimap_entries(source_roots, asset_files, entries)
-
-    for name, path in asset_files.items():
-        entries[f"assets/{name}"] = path
+    add_client_map_assets(client_assets_root, entries)
+    add_world_map_assets(world_root, client_assets_root, entries)
 
     write_zip(output_path, entries)
 
