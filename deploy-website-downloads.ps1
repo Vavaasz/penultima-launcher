@@ -205,10 +205,13 @@ $feedVersion = if (Test-Path $feedVersionPath) {
 
 $launcherMetadata = $null
 if (Test-Path $launcherZipPath) {
+  $launcherZipHash = (Get-FileHash $launcherZipPath -Algorithm SHA256).Hash
+  $launcherZipCacheKey = $launcherZipHash.Substring(0, 12).ToLowerInvariant()
+
   $launcherMetadata = [ordered]@{
     version = $launcherVersion
-    zip = "downloads/$launcherVersionedZipName"
-    sha256 = (Get-FileHash $launcherZipPath -Algorithm SHA256).Hash
+    zip = "downloads/$launcherVersionedZipName?sha256=$launcherZipCacheKey"
+    sha256 = $launcherZipHash
     size = (Get-Item $launcherZipPath).Length
     signed = $launcherSigned
     signature_status = $launcherSignatureStatus

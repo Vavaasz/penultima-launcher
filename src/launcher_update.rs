@@ -124,22 +124,24 @@ impl LauncherUpdateManager {
         )
         .await?;
 
-        if let Some(expected_size) = release.size {
-            let actual_size = zip_path
-                .metadata()
-                .with_context(|| format!("Falha ao ler {}", zip_path.display()))?
-                .len();
-            if actual_size != expected_size {
-                return Err(anyhow!(
-                    "Tamanho invalido para {} (esperado {}, obtido {})",
-                    zip_path.display(),
-                    expected_size,
-                    actual_size
-                ));
-            }
+        if let Err(first_error) = verify_launcher_archive(&zip_path, &release) {
+            let retry_url = cache_busted_download_url(&zip_url, &release.sha256);
+            info!(
+                "Launcher update download failed validation from {}; retrying with {}: {:#}",
+                zip_url, retry_url, first_error
+            );
+            download_to_path_with_progress(
+                &download_client,
+                &retry_url,
+                &zip_path,
+                &message_sender,
+                "Baixando update do launcher",
+                0.0,
+                0.72,
+            )
+            .await?;
+            verify_launcher_archive(&zip_path, &release)?;
         }
-
-        verify_hash(&zip_path, &release.sha256)?;
 
         send_message(
             &message_sender,
@@ -480,6 +482,42 @@ fn resolve_download_url(path: &str) -> Result<String> {
     ))
 }
 
+fn verify_launcher_archive(zip_path: &Path, release: &LauncherRelease) -> Result<()> {
+    if let Some(expected_size) = release.size {
+        let actual_size = zip_path
+            .metadata()
+            .with_context(|| format!("Falha ao ler {}", zip_path.display()))?
+            .len();
+        if actual_size != expected_size {
+            return Err(anyhow!(
+                "Tamanho invalido para {} (esperado {}, obtido {})",
+                zip_path.display(),
+                expected_size,
+                actual_size
+            ));
+        }
+    }
+
+    verify_hash(zip_path, &release.sha256)
+}
+
+fn cache_busted_download_url(url: &str, expected_hash: &str) -> String {
+    let cache_key = expected_hash
+        .trim()
+        .chars()
+        .filter(|character| character.is_ascii_hexdigit())
+        .take(12)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let cache_key = if cache_key.is_empty() {
+        "1".to_string()
+    } else {
+        cache_key
+    };
+    let separator = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{separator}verify={cache_key}")
+}
+
 fn parse_version(value: &str) -> Result<Version> {
     let normalized = value.trim().trim_start_matches('v');
     Version::parse(normalized).with_context(|| format!("Versao do launcher invalida: {}", value))
@@ -599,4 +637,27 @@ fn send_message(
     sender
         .send(message)
         .map_err(|error| anyhow!("Falha ao enviar mensagem para a UI: {}", error))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cache_busted_download_url;
+
+    #[test]
+    fn cache_busted_download_url_adds_verify_query() {
+        assert_eq!(
+            cache_busted_download_url(
+                "https://ultimaotserv.online/downloads/Penultima-Launcher-0.1.24.zip",
+                "ABCDEF1234567890",
+            ),
+            "https://ultimaotserv.online/downloads/Penultima-Launcher-0.1.24.zip?verify=abcdef123456"
+        );
+        assert_eq!(
+            cache_busted_download_url(
+                "https://ultimaotserv.online/downloads/Penultima-Launcher.zip?sha256=abc",
+                "1234567890abcdef",
+            ),
+            "https://ultimaotserv.online/downloads/Penultima-Launcher.zip?sha256=abc&verify=1234567890ab"
+        );
+    }
 }
