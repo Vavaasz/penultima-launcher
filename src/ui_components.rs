@@ -21,6 +21,10 @@ const SPLASH_REPAINT_MS: u64 = 16;
 const STATUS_REPAINT_MS: u64 = 33;
 const BACKGROUND_REPAINT_MS: u64 = 33;
 const PLACEHOLDER_MOTION_REPAINT_MS: u64 = 16;
+const WIDE_LAYOUT_BREAKPOINT: f32 = 880.0;
+const DASHBOARD_TWO_COLUMN_BREAKPOINT: f32 = 620.0;
+const SIDEBAR_MAX_WIDTH: f32 = 300.0;
+const SIDEBAR_MIN_WIDTH: f32 = 220.0;
 
 fn preview_repaint_delay_ms(delay_ms: u32) -> u64 {
     delay_ms.clamp(PREVIEW_REPAINT_MIN_MS, PREVIEW_REPAINT_MAX_MS) as u64
@@ -94,10 +98,6 @@ fn secondary_button(ui: &mut egui::Ui, label: &str, width: f32, height: f32) -> 
     )
 }
 
-fn small_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
-    small_button_sized(ui, label, 122.0)
-}
-
 fn small_button_sized(ui: &mut egui::Ui, label: &str, width: f32) -> egui::Response {
     ui.add_sized(
         [width, 30.0],
@@ -112,9 +112,9 @@ fn small_button_sized(ui: &mut egui::Ui, label: &str, width: f32) -> egui::Respo
     )
 }
 
-fn sidebar_action_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+fn sidebar_action_button_sized(ui: &mut egui::Ui, label: &str, width: f32) -> egui::Response {
     ui.add_sized(
-        [138.0, 34.0],
+        [width, 34.0],
         egui::Button::new(
             egui::RichText::new(label)
                 .size(12.5)
@@ -126,8 +126,13 @@ fn sidebar_action_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     )
 }
 
-fn centered_fixed_row(ui: &mut egui::Ui, row_width: f32, add_contents: impl FnOnce(&mut egui::Ui)) {
+fn centered_responsive_row(
+    ui: &mut egui::Ui,
+    row_width: f32,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
     ui.horizontal(|ui| {
+        let row_width = row_width.min(ui.available_width());
         ui.add_space(((ui.available_width() - row_width) * 0.5).max(0.0));
         add_contents(ui);
     });
@@ -300,37 +305,82 @@ pub fn render_all_components(
         )
         .show(ctx, |ui| {
             launcher.render_background_impl(ui);
-            ui.set_min_size(available_size);
 
-            ui.add_space(18.0);
-            ui.horizontal_top(|ui| {
-                ui.add_space(22.0);
+            let margin = if available_size.x < WIDE_LAYOUT_BREAKPOINT {
+                12.0
+            } else {
+                22.0
+            };
+            let gap = 18.0;
+            let layout_height = (available_size.y - margin * 2.0).max(260.0);
+            let inner_width = (available_size.x - margin * 2.0).max(280.0);
 
-                ui.vertical(|ui| {
-                    ui.set_width(300.0);
-                    ui.set_min_height((available_size.y - 36.0).max(0.0));
-                    launcher.render_launcher_sidebar_impl(ui, ctx, available_size);
-                });
+            ui.add_space(margin);
+            if available_size.x < WIDE_LAYOUT_BREAKPOINT {
+                egui::ScrollArea::vertical()
+                    .id_salt("launcher-compact-scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.add_space(0.0);
+                        ui.horizontal(|ui| {
+                            ui.add_space(margin);
+                            ui.vertical(|ui| {
+                                ui.set_width(inner_width);
+                                launcher.render_launcher_sidebar_impl(
+                                    ui,
+                                    ctx,
+                                    egui::vec2(inner_width, layout_height),
+                                );
+                                ui.add_space(14.0);
+                                launcher.render_site_content_impl(ui, ctx);
+                            });
+                            ui.add_space(margin);
+                        });
+                    });
+            } else {
+                ui.horizontal_top(|ui| {
+                    ui.add_space(margin);
 
-                ui.add_space(18.0);
-
-                ui.vertical(|ui| {
-                    let content_width = (available_size.x - 370.0).max(560.0);
-                    let content_height = (available_size.y - 36.0).max(360.0);
+                    let sidebar_width =
+                        (available_size.x * 0.27).clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
                     ui.allocate_ui_with_layout(
-                        egui::vec2(content_width, content_height),
+                        egui::vec2(sidebar_width, layout_height),
+                        egui::Layout::top_down(egui::Align::Center),
+                        |ui| {
+                            ui.set_width(sidebar_width);
+                            egui::ScrollArea::vertical()
+                                .id_salt("launcher-sidebar-scroll")
+                                .auto_shrink([false, false])
+                                .max_height(layout_height)
+                                .show(ui, |ui| {
+                                    ui.set_width(sidebar_width);
+                                    launcher.render_launcher_sidebar_impl(
+                                        ui,
+                                        ctx,
+                                        egui::vec2(sidebar_width, layout_height),
+                                    );
+                                });
+                        },
+                    );
+
+                    ui.add_space(gap);
+
+                    let content_width =
+                        (available_size.x - margin * 2.0 - sidebar_width - gap).max(320.0);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(content_width, layout_height),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
                             ui.set_width(content_width);
-                            ui.set_height(content_height);
-                            ui.set_max_height(content_height);
+                            ui.set_height(layout_height);
+                            ui.set_max_height(layout_height);
                             launcher.render_site_content_impl(ui, ctx);
                         },
                     );
-                });
 
-                ui.add_space(22.0);
-            });
+                    ui.add_space(margin);
+                });
+            }
         });
 }
 
@@ -471,6 +521,9 @@ impl GameLauncher {
         available_size: egui::Vec2,
     ) {
         ui.vertical_centered(|ui| {
+            let sidebar_width = ui
+                .available_width()
+                .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
             self.render_logo_impl(ui);
 
             if self.is_processing || self.temp_message_time.is_some() {
@@ -505,34 +558,41 @@ impl GameLauncher {
             );
 
             ui.add_space(8.0);
-            centered_fixed_row(ui, 284.0, |ui| {
-                if sidebar_action_button(ui, "Client Folder").clicked() {
+            let action_row_width = sidebar_width.min(284.0);
+            let action_button_width = ((action_row_width - 8.0) * 0.5).clamp(96.0, 138.0);
+            let action_row_width = action_button_width * 2.0 + 8.0;
+
+            centered_responsive_row(ui, action_row_width, |ui| {
+                if sidebar_action_button_sized(ui, "Client Folder", action_button_width).clicked() {
                     self.select_install_folder(ctx);
                 }
 
-                if sidebar_action_button(ui, "Full Map").clicked() {
+                if sidebar_action_button_sized(ui, "Full Map", action_button_width).clicked() {
                     self.start_full_minimap_download(ctx);
                 }
             });
 
             ui.add_space(6.0);
-            centered_fixed_row(ui, 284.0, |ui| {
-                if sidebar_action_button(ui, "Force Update").clicked() {
+            centered_responsive_row(ui, action_row_width, |ui| {
+                if sidebar_action_button_sized(ui, "Force Update", action_button_width).clicked() {
                     self.trigger_force_update(ctx);
                 }
 
-                if sidebar_action_button(ui, "Min Launcher").clicked() {
+                if sidebar_action_button_sized(ui, "Min Launcher", action_button_width).clicked() {
                     self.minimize_to_tray(ctx);
                 }
             });
 
             ui.add_space(6.0);
-            centered_fixed_row(ui, 284.0, |ui| {
-                if sidebar_action_button(ui, "Min/Restore Clients").clicked() {
+            centered_responsive_row(ui, action_row_width, |ui| {
+                if sidebar_action_button_sized(ui, "Min/Restore Clients", action_button_width)
+                    .clicked()
+                {
                     self.open_minimize_client_selector(ctx);
                 }
 
-                if sidebar_action_button(ui, "Update Launcher").clicked() {
+                if sidebar_action_button_sized(ui, "Update Launcher", action_button_width).clicked()
+                {
                     self.start_launcher_update(ctx);
                 }
             });
@@ -629,30 +689,47 @@ impl GameLauncher {
                 egui::containers::scroll_area::ScrollBarVisibility::AlwaysVisible,
             )
             .show(ui, |ui| {
-                ui.columns(2, |columns| {
-                    self.render_boosts_card_impl(&mut columns[0]);
-                    self.render_events_card_impl(&mut columns[1]);
-                });
+                if ui.available_width() >= DASHBOARD_TWO_COLUMN_BREAKPOINT {
+                    ui.columns(2, |columns| {
+                        self.render_boosts_card_impl(&mut columns[0]);
+                        self.render_events_card_impl(&mut columns[1]);
+                    });
+                } else {
+                    self.render_boosts_card_impl(ui);
+                    ui.add_space(12.0);
+                    self.render_events_card_impl(ui);
+                }
 
                 ui.add_space(12.0);
 
-                ui.columns(2, |columns| {
-                    let battle_pass = self.website_status.battle_pass.clone();
+                let battle_pass = self.website_status.battle_pass.clone();
+                let pack_week = self.website_status.pack_week.clone();
+                if ui.available_width() >= DASHBOARD_TWO_COLUMN_BREAKPOINT {
+                    ui.columns(2, |columns| {
+                        self.render_offer_card_impl(
+                            &mut columns[0],
+                            "Battle Pass",
+                            battle_pass.as_ref(),
+                            BATTLE_PASS_URL,
+                        );
+
+                        self.render_offer_card_impl(
+                            &mut columns[1],
+                            "Pack Week",
+                            pack_week.as_ref(),
+                            PACK_WEEK_URL,
+                        );
+                    });
+                } else {
                     self.render_offer_card_impl(
-                        &mut columns[0],
+                        ui,
                         "Battle Pass",
                         battle_pass.as_ref(),
                         BATTLE_PASS_URL,
                     );
-
-                    let pack_week = self.website_status.pack_week.clone();
-                    self.render_offer_card_impl(
-                        &mut columns[1],
-                        "Pack Week",
-                        pack_week.as_ref(),
-                        PACK_WEEK_URL,
-                    );
-                });
+                    ui.add_space(12.0);
+                    self.render_offer_card_impl(ui, "Pack Week", pack_week.as_ref(), PACK_WEEK_URL);
+                }
 
                 ui.add_space(12.0);
                 self.render_investor_card_impl(ui);
@@ -1063,10 +1140,13 @@ impl GameLauncher {
     }
 
     fn render_external_links_impl(&mut self, ui: &mut egui::Ui) {
-        centered_fixed_row(ui, 272.0, |ui| {
+        let row_width = ui.available_width().min(272.0);
+        let button_width = ((row_width - 8.0) * 0.5).clamp(96.0, 132.0);
+        let row_width = button_width * 2.0 + 8.0;
+        centered_responsive_row(ui, row_width, |ui| {
             if ui
                 .add_sized(
-                    [132.0, 32.0],
+                    [button_width, 32.0],
                     egui::Button::new("Website")
                         .fill(panel_fill(220))
                         .corner_radius(8.0)
@@ -1079,7 +1159,7 @@ impl GameLauncher {
 
             if ui
                 .add_sized(
-                    [132.0, 32.0],
+                    [button_width, 32.0],
                     egui::Button::new("Discord")
                         .fill(accent_fill())
                         .corner_radius(8.0)
@@ -1093,7 +1173,7 @@ impl GameLauncher {
     }
 
     fn render_launch_buttons_compact_impl(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let button_width = 250.0;
+        let button_width = ui.available_width().min(250.0).max(180.0);
         let button_height = 40.0;
 
         let (has_main_client, additional_count) = self.game_client.sync_client_state();
@@ -1149,7 +1229,8 @@ impl GameLauncher {
     }
 
     fn render_utility_buttons_compact_impl(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        centered_fixed_row(ui, 250.0, |ui| {
+        let settings_width = ui.available_width().min(250.0).max(180.0);
+        centered_responsive_row(ui, settings_width, |ui| {
             let mut disable_auto_start = self.disable_auto_start;
             if ui
                 .checkbox(
@@ -1169,8 +1250,9 @@ impl GameLauncher {
 
         ui.add_space(6.0);
 
-        centered_fixed_row(ui, 122.0, |ui| {
-            if small_button(ui, "Limpar Cache").clicked() {
+        let cache_width = ui.available_width().min(122.0).max(110.0);
+        centered_responsive_row(ui, cache_width, |ui| {
+            if small_button_sized(ui, "Limpar Cache", cache_width).clicked() {
                 self.start_cache_clean(ctx);
             }
         });
@@ -1386,7 +1468,8 @@ impl GameLauncher {
         ui.add_space(35.0);
 
         if let Some(logo) = &self.logo_texture {
-            let final_size = egui::vec2(LOGO_SIZE.0, LOGO_SIZE.1);
+            let scale = (ui.available_width() / LOGO_SIZE.0).min(1.0).max(0.55);
+            let final_size = egui::vec2(LOGO_SIZE.0 * scale, LOGO_SIZE.1 * scale);
 
             ui.add(egui::Image::new(egui::ImageSource::Texture(
                 egui::load::SizedTexture::new(logo.id(), final_size),

@@ -338,7 +338,8 @@ fn parse_offer_previews(html: &str, limit: usize) -> Vec<OfferPreview> {
             continue;
         }
 
-        let url = static_sprite_preview_url(&normalize_url(&decode_html_entities(&src)));
+        let url =
+            bounded_animated_sprite_preview_url(&normalize_url(&decode_html_entities(&src)), 8);
         if previews
             .iter()
             .any(|preview: &OfferPreview| preview.url == url)
@@ -435,7 +436,7 @@ mod tests {
     use super::{bounded_animated_sprite_preview_url, static_sprite_preview_url};
 
     #[test]
-    fn offer_sprite_previews_request_static_images() {
+    fn offer_sprite_previews_can_request_static_images() {
         let url = "https://ultimaotserv.online/tools/sprite.php?type=outfit&id=132&animate=1";
         assert_eq!(
             static_sprite_preview_url(url),

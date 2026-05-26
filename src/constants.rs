@@ -38,6 +38,7 @@ pub const DISCORD_URL: &str = "https://discord.gg/ytNUWGbjg6";
 
 /// Website changelog page used by the launcher news tab
 pub const CHANGELOG_URL: &str = "https://ultimaotserv.online/?changelog";
+pub const LAUNCHER_ASSET_BASE_URL: &str = "https://ultimaotserv.online/downloads/launcher-assets";
 
 /// Website event calendar page used by the launcher dashboard
 pub const EVENT_CALENDAR_URL: &str = "https://ultimaotserv.online/?eventcalendar";
@@ -218,7 +219,7 @@ pub const UI_MESSAGE_DISPLAY_DURATION: Duration = Duration::from_secs(2);
 
 /// Tamanho desejado da janela principal
 pub const MAIN_WINDOW_SIZE: (f32, f32) = (1240.0, 800.0);
-pub const MIN_WINDOW_SIZE: (f32, f32) = (1040.0, 680.0);
+pub const MIN_WINDOW_SIZE: (f32, f32) = (420.0, 520.0);
 
 /// Tamanho da janela (alias para compatibilidade)
 pub const WINDOW_SIZE: (f32, f32) = MAIN_WINDOW_SIZE;

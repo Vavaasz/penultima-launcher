@@ -25,6 +25,7 @@ mod constants;
 mod full_map;
 mod game_client;
 mod instance_manager;
+mod launcher_assets;
 mod launcher_update;
 mod logger;
 mod message_system;
@@ -44,12 +45,14 @@ use config_modal::ConfigModal;
 use constants::*;
 use game_client::{ClientWindowInfo, GameClient, WindowState};
 use instance_manager::InstanceManager;
+use launcher_assets::{LAUNCHER_ASSETS, LauncherAssetKind};
 use message_system::LauncherMessage;
 use tray_manager::{TrayAction, TrayManager};
 use website_status::WebsiteStatus;
 use window_manager::WindowManager;
 
 const MAX_CONCURRENT_OFFER_PREVIEWS: usize = 2;
+const OFFER_ANIMATED_PREVIEW_FRAMES: usize = 8;
 const BOOSTED_FAST_ANIMATED_PREVIEW_FRAMES: usize = 4;
 const BOOSTED_FULL_ANIMATED_PREVIEW_FRAMES: usize = 8;
 const CLIENTS_TRAY_SYNC_INTERVAL: Duration = Duration::from_millis(1000);
@@ -96,6 +99,7 @@ struct GameLauncher {
     background_texture: Option<egui::TextureHandle>, // Nova propriedade para o papel de parede
     logo_texture: Option<egui::TextureHandle>, // Nova propriedade para o logo
     splash_logo_texture: Option<egui::TextureHandle>,
+    launcher_assets_refresh_started: bool,
     startup_splash_started: Instant,
     startup_splash_finished: bool,
     show_footer: bool, // Nova variável para controlar a visibilidade do rodapé
@@ -193,6 +197,7 @@ impl Default for GameLauncher {
             background_texture: None,
             logo_texture: None, // Inicializar o logo como None
             splash_logo_texture: None,
+            launcher_assets_refresh_started: false,
             startup_splash_started: Instant::now(),
             startup_splash_finished: false,
             show_footer: false,             // Rodapé desabilitado por padrão
@@ -559,8 +564,9 @@ impl GameLauncher {
             let sender = message_sender.clone();
             let preview_cache_dir = self.state_path.join("preview-cache");
             tokio::spawn(async move {
-                match boosted_preview::fetch_static_preview_cached(
+                match boosted_preview::fetch_animated_preview_cached(
                     url.clone(),
+                    OFFER_ANIMATED_PREVIEW_FRAMES,
                     max_dimension,
                     preview_cache_dir,
                 )
@@ -674,7 +680,12 @@ impl GameLauncher {
 
         let url = preview.url.clone();
         let texture_prefix = format!("offer-preview-{:x}", Self::preview_texture_key(&url));
-        match Self::texture_from_preview_data(ctx, &texture_prefix, preview, 1) {
+        match Self::texture_from_preview_data(
+            ctx,
+            &texture_prefix,
+            preview,
+            OFFER_ANIMATED_PREVIEW_FRAMES,
+        ) {
             Ok(texture) => {
                 self.offer_preview_textures.insert(url.clone(), texture);
                 self.offer_preview_errors.remove(&url);
@@ -1694,6 +1705,12 @@ impl GameLauncher {
                             self.offer_preview_errors.insert(url, error);
                         }
                     }
+                    LauncherMessage::LauncherAssetLoaded(kind, bytes) => {
+                        self.apply_launcher_asset(ctx, kind, &bytes);
+                    }
+                    LauncherMessage::LauncherAssetError(kind, error) => {
+                        info!("Falha ao carregar asset do launcher {:?}: {}", kind, error);
+                    }
                     LauncherMessage::SetStatus(status) => {
                         self.status = status;
                     }
@@ -2173,6 +2190,12 @@ impl GameLauncher {
                             self.apply_offer_preview_error(url, error);
                             self.refresh_offer_previews();
                         }
+                        LauncherMessage::LauncherAssetLoaded(kind, bytes) => {
+                            self.apply_launcher_asset(ctx, kind, &bytes);
+                        }
+                        LauncherMessage::LauncherAssetError(kind, error) => {
+                            info!("Falha ao carregar asset do launcher {:?}: {}", kind, error);
+                        }
                         LauncherMessage::RestartLauncherForUpdate => {
                             self.restart_launcher_for_update(ctx);
                         }
@@ -2384,94 +2407,84 @@ impl GameLauncher {
         Some(ctx.load_texture(name, texture, options))
     }
 
+    fn apply_launcher_asset(
+        &mut self,
+        ctx: &egui::Context,
+        kind: LauncherAssetKind,
+        bytes: &[u8],
+    ) -> bool {
+        let Some(texture) = Self::load_texture_from_memory(
+            ctx,
+            kind.texture_name(),
+            bytes,
+            Some(kind.max_dimension()),
+            egui::TextureOptions::LINEAR,
+        ) else {
+            return false;
+        };
+
+        match kind {
+            LauncherAssetKind::Background => self.background_texture = Some(texture),
+            LauncherAssetKind::Logo => self.logo_texture = Some(texture),
+            LauncherAssetKind::SplashLogo => self.splash_logo_texture = Some(texture),
+        }
+
+        true
+    }
+
     fn load_background(&mut self, ctx: &egui::Context) {
-        self.background_texture = Self::load_texture_from_memory(
-            ctx,
-            "background",
-            include_bytes!("../assets/website-background.jpg"),
-            Some(1024),
-            egui::TextureOptions::LINEAR,
-        );
-        self.logo_texture = Self::load_texture_from_memory(
-            ctx,
-            "logo",
-            include_bytes!("../assets/penultima-phoenix.png"),
-            Some(360),
-            egui::TextureOptions::LINEAR,
-        );
-        self.splash_logo_texture = Self::load_texture_from_memory(
-            ctx,
-            "splash-logo",
-            include_bytes!("../assets/ultima-website-logo.png"),
-            Some(512),
-            egui::TextureOptions::LINEAR,
-        );
-    }
-
-    /*
-
-        // Carregar o papel de parede
-        if let Ok(image_data) =
-            image::load_from_memory(include_bytes!("../assets/website-background.jpg"))
-        {
-            let image = image_data.into_rgba8();
-            let (width, height) = image.dimensions();
-            let rgba = image.into_raw();
-
-            // Criar textura do egui
-            let texture =
-                egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba);
-
-            // Armazenar a textura
-            self.background_texture =
-                Some(ctx.load_texture("background", texture, egui::TextureOptions::LINEAR));
-
-            info!("Papel de parede carregado em {}x{}", width, height);
-        } else {
-            info!("Não foi possível carregar o papel de parede");
-        }
-
-        // Carregar o logo
-        if let Ok(logo_data) =
-            image::load_from_memory(include_bytes!("../assets/penultima-phoenix.png"))
-        {
-            let logo = logo_data.into_rgba8();
-
-            let (width, height) = logo.dimensions();
-            let rgba = logo.into_raw();
-
-            // Criar textura do egui para o logo
-            let texture =
-                egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba);
-
-            // Armazenar a textura do logo
-            self.logo_texture =
-                Some(ctx.load_texture("logo", texture, egui::TextureOptions::LINEAR));
-
-            info!("Logo carregado em {}x{}", width, height);
-        } else {
-            info!("Não foi possível carregar o logo");
-        }
-
-        if let Ok(logo_data) =
-            image::load_from_memory(include_bytes!("../assets/ultima-website-logo.png"))
-        {
-            let logo = logo_data.into_rgba8();
-            let (width, height) = logo.dimensions();
-            let rgba = logo.into_raw();
-            let texture =
-                egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba);
-
-            self.splash_logo_texture =
-                Some(ctx.load_texture("splash-logo", texture, egui::TextureOptions::LINEAR));
-
-            info!("Logo de abertura carregado em {}x{}", width, height);
-        } else {
-            info!("NÃ£o foi possÃ­vel carregar o logo de abertura");
+        for kind in LAUNCHER_ASSETS {
+            if let Some(bytes) = launcher_assets::load_cached_asset(&self.state_path, kind) {
+                self.apply_launcher_asset(ctx, kind, &bytes);
+            }
         }
     }
 
-        */
+    fn queue_launcher_asset_refresh(&mut self) {
+        if self.launcher_assets_refresh_started {
+            return;
+        }
+
+        self.launcher_assets_refresh_started = true;
+        let sender = self.ensure_message_sender();
+        let state_path = self.state_path.clone();
+
+        tokio::spawn(async move {
+            let client = match launcher_assets::http_client() {
+                Ok(client) => client,
+                Err(error) => {
+                    for kind in LAUNCHER_ASSETS {
+                        let _ = sender.send(LauncherMessage::LauncherAssetError(
+                            kind,
+                            format!("{:#}", error),
+                        ));
+                    }
+                    return;
+                }
+            };
+
+            for kind in LAUNCHER_ASSETS {
+                match launcher_assets::fetch_and_cache_asset(
+                    client.clone(),
+                    state_path.clone(),
+                    kind,
+                )
+                .await
+                {
+                    Ok(bytes) => {
+                        let _ = sender.send(LauncherMessage::LauncherAssetLoaded(kind, bytes));
+                    }
+                    Err(error) => {
+                        let _ = sender.send(LauncherMessage::LauncherAssetError(
+                            kind,
+                            format!("{:#}", error),
+                        ));
+                    }
+                }
+            }
+        });
+    }
+
     fn render_central_panel(&mut self, ctx: &egui::Context, available_size: egui::Vec2) {
         if !self.startup_splash_finished {
             ui_components::render_startup_splash(self, ctx, available_size);
@@ -2608,9 +2621,11 @@ async fn main() -> Result<()> {
             launcher.auto_hide = args.auto_hide;
             launcher.window_manager = Some(window_manager);
             launcher.tray_manager = Some(tray_manager);
+            launcher.setup_update_channel();
 
             // Carregar o papel de parede
             launcher.load_background(&cc.egui_ctx);
+            launcher.queue_launcher_asset_refresh();
 
             Ok(Box::new(launcher))
         }),

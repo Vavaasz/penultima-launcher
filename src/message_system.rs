@@ -1,5 +1,6 @@
 // Mensagens que podem ser enviadas ao launcher
 use crate::boosted_preview::{BoostedPreviewData, BoostedPreviewKind, BoostedPreviewLoadPhase};
+use crate::launcher_assets::LauncherAssetKind;
 use crate::website_status::WebsiteStatus;
 use std::path::PathBuf;
 
@@ -29,5 +30,7 @@ pub enum LauncherMessage {
     BoostedPreviewError(BoostedPreviewKind, String, String),
     OfferPreviewLoaded(BoostedPreviewData),
     OfferPreviewError(String, String),
+    LauncherAssetLoaded(LauncherAssetKind, Vec<u8>),
+    LauncherAssetError(LauncherAssetKind, String),
     RestartLauncherForUpdate,
 }
