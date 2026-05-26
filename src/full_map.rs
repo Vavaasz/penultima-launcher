@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, anyhow};
+use flate2::read::ZlibDecoder;
 use futures_util::StreamExt;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -230,10 +231,15 @@ pub fn install_full_minimap_from_zip(
     let assets_dir = game_path.join("assets");
     fs::create_dir_all(&minimap_dir)
         .with_context(|| format!("Nao foi possivel criar {}", minimap_dir.display()))?;
-    fs::create_dir_all(&assets_dir)
-        .with_context(|| format!("Nao foi possivel criar {}", assets_dir.display()))?;
     cleanup_stale_full_map_minimap(&minimap_dir, &entries)?;
-    cleanup_stale_full_map_assets(&assets_dir, &entries)?;
+    if entries
+        .iter()
+        .any(|entry| entry.root == FullMapInstallRoot::Assets)
+    {
+        fs::create_dir_all(&assets_dir)
+            .with_context(|| format!("Nao foi possivel criar {}", assets_dir.display()))?;
+        cleanup_stale_full_map_assets(&assets_dir, &entries)?;
+    }
 
     let mut created_directories = HashSet::new();
     let mut extracted_files = 0usize;
@@ -837,8 +843,17 @@ fn write_atomic_bytes(destination: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 fn is_client_minimap_file(filename: &str) -> bool {
+    is_client_minimap_color_file(filename)
+}
+
+fn is_client_minimap_color_file(filename: &str) -> bool {
     let lower = filename.to_ascii_lowercase();
-    lower.starts_with("minimap_color_") || lower.starts_with("minimap_waypointcost_")
+    lower.starts_with("minimap_color_")
+}
+
+fn is_client_waypoint_cost_file(filename: &str) -> bool {
+    let lower = filename.to_ascii_lowercase();
+    lower.starts_with("minimap_waypointcost_")
 }
 
 fn is_asset_map_file(filename: &str) -> bool {
@@ -909,17 +924,152 @@ fn cleanup_stale_full_map_minimap(
             continue;
         }
 
+        let path = entry.path();
         let filename = entry.file_name().to_string_lossy().to_ascii_lowercase();
-        if !is_client_minimap_file(&filename) || archive_minimap_filenames.contains(&filename) {
+        if is_client_waypoint_cost_file(&filename) {
+            if matches!(is_broken_waypoint_cost_file(&path), Ok(true)) {
+                fs::remove_file(&path).with_context(|| {
+                    format!("Falha ao remover waypoint-cost invalido {}", path.display())
+                })?;
+            }
             continue;
         }
 
-        fs::remove_file(entry.path()).with_context(|| {
-            format!("Falha ao remover minimap antigo {}", entry.path().display())
-        })?;
+        if !is_client_minimap_color_file(&filename) || archive_minimap_filenames.contains(&filename)
+        {
+            continue;
+        }
+
+        fs::remove_file(&path)
+            .with_context(|| format!("Falha ao remover minimap antigo {}", path.display()))?;
     }
 
     Ok(())
+}
+
+fn is_broken_waypoint_cost_file(path: &Path) -> Result<bool> {
+    let data = fs::read(path).with_context(|| format!("Falha ao ler {}", path.display()))?;
+    Ok(classify_broken_waypoint_cost_png(&data).unwrap_or(false))
+}
+
+fn classify_broken_waypoint_cost_png(data: &[u8]) -> Option<bool> {
+    if !data.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some(false);
+    }
+
+    let mut offset = 8usize;
+    let mut width = None;
+    let mut height = None;
+    let mut bit_depth = None;
+    let mut color_type = None;
+    let mut interlace = None;
+    let mut idat = Vec::new();
+
+    while offset.checked_add(8)? <= data.len() {
+        let length = u32::from_be_bytes(data[offset..offset + 4].try_into().ok()?) as usize;
+        let chunk_type = &data[offset + 4..offset + 8];
+        offset += 8;
+
+        let payload_end = offset.checked_add(length)?;
+        let chunk_end = payload_end.checked_add(4)?;
+        if chunk_end > data.len() {
+            return None;
+        }
+        let payload = &data[offset..payload_end];
+
+        match chunk_type {
+            b"IHDR" if payload.len() >= 13 => {
+                width = Some(u32::from_be_bytes(payload[0..4].try_into().ok()?));
+                height = Some(u32::from_be_bytes(payload[4..8].try_into().ok()?));
+                bit_depth = Some(payload[8]);
+                color_type = Some(payload[9]);
+                interlace = Some(payload[12]);
+            }
+            b"IDAT" => idat.extend_from_slice(payload),
+            b"IEND" => break,
+            _ => {}
+        }
+
+        offset = chunk_end;
+    }
+
+    let width = width?;
+    let height = height?;
+    if bit_depth? != 8 || color_type? != 3 {
+        return Some(true);
+    }
+    if interlace? != 0 || width == 0 || height == 0 || width > 4096 || height > 4096 {
+        return None;
+    }
+    if idat.is_empty() {
+        return None;
+    }
+
+    let mut decoder = ZlibDecoder::new(idat.as_slice());
+    let mut decoded = Vec::new();
+    if decoder.read_to_end(&mut decoded).is_err() {
+        return None;
+    }
+
+    indexed_png_scanlines_are_all_zero(width as usize, height as usize, &decoded)
+}
+
+fn indexed_png_scanlines_are_all_zero(width: usize, height: usize, decoded: &[u8]) -> Option<bool> {
+    let row_size = width.checked_add(1)?;
+    let expected_size = row_size.checked_mul(height)?;
+    if decoded.len() < expected_size {
+        return None;
+    }
+
+    let mut previous = vec![0u8; width];
+    let mut current = vec![0u8; width];
+    let mut all_zero = true;
+
+    for y in 0..height {
+        let row_offset = y.checked_mul(row_size)?;
+        let filter = decoded[row_offset];
+        current.copy_from_slice(&decoded[row_offset + 1..row_offset + 1 + width]);
+
+        for x in 0..width {
+            let left = if x == 0 { 0 } else { current[x - 1] };
+            let up = previous[x];
+            let upper_left = if x == 0 { 0 } else { previous[x - 1] };
+            let predictor = match filter {
+                0 => 0,
+                1 => left,
+                2 => up,
+                3 => ((left as u16 + up as u16) / 2) as u8,
+                4 => paeth_predictor(left, up, upper_left),
+                _ => return None,
+            };
+            current[x] = current[x].wrapping_add(predictor);
+            if current[x] != 0 {
+                all_zero = false;
+            }
+        }
+
+        previous.copy_from_slice(&current);
+    }
+
+    Some(all_zero)
+}
+
+fn paeth_predictor(left: u8, up: u8, upper_left: u8) -> u8 {
+    let left = left as i32;
+    let up = up as i32;
+    let upper_left = upper_left as i32;
+    let estimate = left + up - upper_left;
+    let left_distance = (estimate - left).abs();
+    let up_distance = (estimate - up).abs();
+    let upper_left_distance = (estimate - upper_left).abs();
+
+    if left_distance <= up_distance && left_distance <= upper_left_distance {
+        left as u8
+    } else if up_distance <= upper_left_distance {
+        up as u8
+    } else {
+        upper_left as u8
+    }
 }
 
 fn is_cleanup_candidate_asset(filename: &str) -> bool {
@@ -977,6 +1127,7 @@ mod tests {
         hash_file, install_full_minimap_from_zip, resolve_download_url, verify_hash,
     };
     use crate::tokio::sync::mpsc;
+    use flate2::{Compression, write::ZlibEncoder};
     use std::fs;
     use std::io::Write;
     use std::path::{Path, PathBuf};
@@ -1047,6 +1198,10 @@ mod tests {
         assert_eq!(full_map_archive_path("../escape.png"), None);
         assert_eq!(full_map_archive_path("minimap/../escape.png"), None);
         assert_eq!(full_map_archive_path("C:/escape.png"), None);
+        assert_eq!(
+            full_map_archive_path("minimap/Minimap_WaypointCost_0_0_7.png"),
+            None
+        );
         assert_eq!(full_map_archive_path("assets/not-a-map.txt"), None);
     }
 
@@ -1091,8 +1246,13 @@ mod tests {
         fs::create_dir_all(&minimap_dir).unwrap();
         fs::write(minimap_dir.join("Minimap_Color_stale.png"), b"stale-color").unwrap();
         fs::write(
-            minimap_dir.join("Minimap_WaypointCost_stale.png"),
-            b"stale-waypoint",
+            minimap_dir.join("Minimap_WaypointCost_bad.png"),
+            waypoint_cost_png(0),
+        )
+        .unwrap();
+        fs::write(
+            minimap_dir.join("Minimap_WaypointCost_keep.png"),
+            waypoint_cost_png(1),
         )
         .unwrap();
         fs::write(minimap_dir.join("notes.txt"), b"keep").unwrap();
@@ -1107,10 +1267,6 @@ mod tests {
             &[
                 ("minimap/Minimap_Color_0_0_7.png", indexed_png_bytes()),
                 (
-                    "Penultima/minimap/Minimap_WaypointCost_0_0_7.png",
-                    indexed_png_bytes(),
-                ),
-                (
                     "assets/minimap-32-0001-0002-07-hash.bmp.lzma",
                     b"asset-minimap".as_slice(),
                 ),
@@ -1124,18 +1280,9 @@ mod tests {
 
         let stats = install_full_minimap_from_zip(&archive_path, &game_path, None).unwrap();
 
-        assert_eq!(stats.files, 7);
+        assert_eq!(stats.files, 6);
         assert_eq!(
             fs::read(game_path.join("minimap").join("Minimap_Color_0_0_7.png")).unwrap(),
-            indexed_png_bytes()
-        );
-        assert_eq!(
-            fs::read(
-                game_path
-                    .join("minimap")
-                    .join("Minimap_WaypointCost_0_0_7.png")
-            )
-            .unwrap(),
             indexed_png_bytes()
         );
         assert_eq!(
@@ -1196,7 +1343,13 @@ mod tests {
         assert!(
             !game_path
                 .join("minimap")
-                .join("Minimap_WaypointCost_stale.png")
+                .join("Minimap_WaypointCost_bad.png")
+                .exists()
+        );
+        assert!(
+            game_path
+                .join("minimap")
+                .join("Minimap_WaypointCost_keep.png")
                 .exists()
         );
         assert_eq!(
@@ -1204,6 +1357,43 @@ mod tests {
             b"keep"
         );
         assert!(!game_path.join("escape.txt").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn minimap_only_install_preserves_assets_and_valid_waypoint_cache() {
+        let root = temp_dir("full-minimap-minimap-only");
+        let archive_path = root.join("map.zip");
+        let game_path = root.join("game");
+        let assets_dir = game_path.join("assets");
+        let minimap_dir = game_path.join("minimap");
+        fs::create_dir_all(&assets_dir).unwrap();
+        fs::create_dir_all(&minimap_dir).unwrap();
+        fs::write(assets_dir.join("map-existing.dat"), b"keep-map").unwrap();
+        fs::write(
+            minimap_dir.join("Minimap_WaypointCost_keep.png"),
+            waypoint_cost_png(1),
+        )
+        .unwrap();
+        fs::write(
+            minimap_dir.join("Minimap_WaypointCost_bad.png"),
+            waypoint_cost_png(0),
+        )
+        .unwrap();
+        create_zip(
+            &archive_path,
+            &[("minimap/Minimap_Color_1_2_7.png", indexed_png_bytes())],
+        );
+
+        install_full_minimap_from_zip(&archive_path, &game_path, None).unwrap();
+
+        assert_eq!(
+            fs::read(assets_dir.join("map-existing.dat")).unwrap(),
+            b"keep-map"
+        );
+        assert!(minimap_dir.join("Minimap_WaypointCost_keep.png").exists());
+        assert!(!minimap_dir.join("Minimap_WaypointCost_bad.png").exists());
 
         let _ = fs::remove_dir_all(root);
     }
@@ -1380,6 +1570,35 @@ mod tests {
 
     fn indexed_png_bytes() -> &'static [u8] {
         b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x03\x00\x00\x00"
+    }
+
+    fn waypoint_cost_png(index: u8) -> Vec<u8> {
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&[0, index]).unwrap();
+        let idat = encoder.finish().unwrap();
+
+        let mut png = Vec::new();
+        png.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+        append_png_chunk(
+            &mut png,
+            b"IHDR",
+            &[
+                0, 0, 0, 1, // width
+                0, 0, 0, 1, // height
+                8, 3, 0, 0, 0,
+            ],
+        );
+        append_png_chunk(&mut png, b"PLTE", &[0, 0, 0, 255, 255, 255]);
+        append_png_chunk(&mut png, b"IDAT", &idat);
+        append_png_chunk(&mut png, b"IEND", &[]);
+        png
+    }
+
+    fn append_png_chunk(png: &mut Vec<u8>, chunk_type: &[u8; 4], payload: &[u8]) {
+        png.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        png.extend_from_slice(chunk_type);
+        png.extend_from_slice(payload);
+        png.extend_from_slice(&0u32.to_be_bytes());
     }
 
     fn temp_dir(prefix: &str) -> PathBuf {

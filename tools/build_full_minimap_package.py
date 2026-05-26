@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """Build the launcher full minimap package from client and server map assets.
 
-The client needs two map surfaces:
-- ``minimap/Minimap_Color_*`` and ``Minimap_WaypointCost_*`` for the normal
-  automap.
-- Original ``assets`` map/catalog files restored from the current client feed.
+The client needs only ``minimap/Minimap_Color_*`` for the normal automap
+reveal. Those files are the same cache surface the client populates as players
+walk around.
 
 The Cyclopedia ``map-*.dat`` protobuf already contains exact top-left
 coordinates for each ``minimap-32`` asset. This script decodes those assets and
 splits them into the 256x256 normal automap PNG tiles consumed by the client.
+
+Do not generate ``Minimap_WaypointCost_*`` files. The client uses those files
+for mouse pathing/click movement and writes valid values as the player explores.
+Fake waypoint costs can make mouse movement impossible even when keyboard
+movement still works.
 
 Do not publish generated server Cyclopedia assets through this package. The
 15.23 client treats those assets as startup-critical, and a mismatched catalog,
@@ -42,7 +46,7 @@ WORLD_PACKAGE_ASSET_PREFIXES = (
     "minimap-",
     "satellite-",
 )
-CLIENT_MINIMAP_RE = re.compile(r"^Minimap_(?:Color|WaypointCost)_\d+_\d+_\d+\.png$", re.I)
+CLIENT_MINIMAP_RE = re.compile(r"^Minimap_Color_\d+_\d+_\d+\.png$", re.I)
 CIP_LZMA_SIGNATURE_PREFIX = bytes((0x70, 0x0A, 0xFA, 0x80))
 CIP_LZMA_MARKER_SIZE = 5
 CIP_HEADER_SIZE = 32
@@ -279,11 +283,6 @@ def encode_png_indexed(width: int, height: int, rgb: bytes) -> bytes:
     )
 
 
-def build_neutral_waypoint_png() -> bytes:
-    waypoint_rgb = b"\x64\x64\x64" * (NORMAL_TILE_SIZE * NORMAL_TILE_SIZE)
-    return encode_png_indexed(NORMAL_TILE_SIZE, NORMAL_TILE_SIZE, waypoint_rgb)
-
-
 def is_asset_file(path: Path) -> bool:
     name = path.name.lower()
     return any(name.startswith(prefix) for prefix in ASSET_PREFIXES)
@@ -447,15 +446,12 @@ def generate_normal_minimap_entries(
                     processed_assets += 1
 
     generated_tiles = 0
-    waypoint_png = build_neutral_waypoint_png()
     for (base_x, base_y, floor), rgb in sorted(tiles.items()):
         if not any(rgb):
             continue
         color_png = encode_png_indexed(NORMAL_TILE_SIZE, NORMAL_TILE_SIZE, bytes(rgb))
         color_name = f"minimap/Minimap_Color_{base_x}_{base_y}_{floor}.png"
-        waypoint_name = f"minimap/Minimap_WaypointCost_{base_x}_{base_y}_{floor}.png"
         entries[color_name] = color_png
-        entries[waypoint_name] = waypoint_png
         generated_tiles += 1
 
     if generated_tiles == 0:
@@ -465,7 +461,7 @@ def generate_normal_minimap_entries(
         f"Generated {generated_tiles} normal minimap color tiles "
         f"from {processed_assets} Cyclopedia minimap assets."
     )
-    return generated_tiles * 2
+    return generated_tiles
 
 
 def write_zip(output_path: Path, entries: dict[str, bytes | Path]) -> None:
@@ -490,8 +486,6 @@ def build_package(client_root: Path, world_root: Path, output_path: Path) -> Non
     entries: dict[str, bytes | Path] = {}
     add_existing_client_minimap(client_root, entries)
     generated_minimap_files = generate_normal_minimap_entries(source_roots, asset_files, entries)
-    add_client_map_assets(client_assets_root, entries)
-
     write_zip(output_path, entries)
 
     minimap_count = sum(1 for name in entries if name.startswith("minimap/"))

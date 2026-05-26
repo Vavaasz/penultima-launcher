@@ -3023,7 +3023,7 @@ dependencies = [
 
 [[package]]
 name = "penultima-launcher"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3031,6 +3031,7 @@ dependencies = [
  "dirs",
  "eframe",
  "egui",
+ "flate2",
  "futures-util",
  "glob",
  "image",

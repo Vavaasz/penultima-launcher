@@ -1,6 +1,6 @@
 [package]
 name = "penultima-launcher"
-version = "0.1.22"
+version = "0.1.23"
 edition = "2024"
 
 # Configuração para recursos do Windows
@@ -8,7 +8,7 @@ edition = "2024"
 OriginalFilename = "penultima-launcher.exe"
 FileDescription = "Penultima Launcher"
 ProductName = "Penultima Launcher"
-ProductVersion = "0.1.21"
+ProductVersion = "0.1.23"
 LegalCopyright = "Copyright 2025"
 
 [profile.dev]
@@ -40,6 +40,7 @@ winapi = { version = "0.3.9", features = ["winuser", "consoleapi", "shellapi"] }
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 zip = "7.4.0"
 futures-util = "0.3.31"
+flate2 = "1.1"
 semver = "1.0.26"
 log = "0.4.27"
 glob = "0.3.2"
