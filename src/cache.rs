@@ -22,12 +22,15 @@ pub struct CacheManager {
 #[derive(Serialize, Deserialize)]
 pub struct UserSettings {
     pub disable_auto_start: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_path: Option<PathBuf>,
 }
 
 impl Default for UserSettings {
     fn default() -> Self {
         Self {
             disable_auto_start: true,
+            game_path: None,
         }
     }
 }

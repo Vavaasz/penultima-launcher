@@ -22,6 +22,7 @@ mod cli;
 mod client_version;
 mod config_modal;
 mod constants;
+mod full_map;
 mod game_client;
 mod instance_manager;
 mod launcher_update;
@@ -48,6 +49,9 @@ use tray_manager::{TrayAction, TrayManager};
 use website_status::WebsiteStatus;
 use window_manager::WindowManager;
 
+const MAX_CONCURRENT_OFFER_PREVIEWS: usize = 2;
+const CLIENTS_TRAY_SYNC_INTERVAL: Duration = Duration::from_millis(1000);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LauncherTab {
     Dashboard,
@@ -63,6 +67,7 @@ struct BoostedPreviewTexture {
     url: String,
     frames: Vec<BoostedPreviewTextureFrame>,
     total_delay_ms: u32,
+    animated: bool,
 }
 
 struct GameLauncher {
@@ -105,6 +110,7 @@ struct GameLauncher {
     website_status: WebsiteStatus,
     website_status_loading: bool,
     last_website_status_refresh: Option<Instant>,
+    cached_website_previews_queued: bool,
     boosted_creature_preview: Option<BoostedPreviewTexture>,
     boosted_boss_preview: Option<BoostedPreviewTexture>,
     boosted_creature_preview_loading_url: Option<String>,
@@ -117,8 +123,11 @@ struct GameLauncher {
     selected_tab: LauncherTab,
     was_hidden: bool, // Controla transição de visibilidade para otimizar CPU quando minimizado
     clients_hidden_to_tray: bool,
+    clients_tray_state_initialized: bool,
+    last_clients_tray_sync: Option<Instant>,
     tray_manager: Option<TrayManager>,
     restart_for_launcher_update: bool,
+    style_configured: bool,
 }
 
 impl Default for GameLauncher {
@@ -126,30 +135,40 @@ impl Default for GameLauncher {
         let app_dirs =
             AppDirs::init().expect("Não foi possível inicializar diretórios da aplicação");
         let download_path = app_dirs.download_path.clone();
-        let game_path = app_dirs.game_path.clone();
         let state_path = app_dirs.state_path.clone();
+        let default_game_path = app_dirs.game_path.clone();
         // Usar AppDirs::get_version_file_path para obter o caminho do arquivo de versão
         let version_file_path = app_dirs.get_version_file_path();
         info!("Caminho do arquivo de versão: {:?}", version_file_path);
 
-        // Usar AppDirs::find_client_paths para listar os clients disponíveis
-        let available_clients = app_dirs.find_client_paths();
-        info!("Clientes disponíveis: {}", available_clients.len());
+        let cache_manager = cache::CacheManager::new(
+            download_path.clone(),
+            default_game_path.clone(),
+            state_path.clone(),
+        );
+        let user_settings = cache_manager.load_user_settings().unwrap_or_default();
+        let game_path = user_settings
+            .game_path
+            .clone()
+            .unwrap_or(default_game_path.clone());
+        if let Err(error) = fs::create_dir_all(&game_path) {
+            info!(
+                "Nao foi possivel criar diretorio do cliente selecionado {}: {}",
+                game_path.display(),
+                error
+            );
+        }
+        info!("Diretorio do cliente selecionado: {:?}", game_path);
 
         // Criar GameClient com número máximo específico de clientes
         let mut game_client = GameClient::default();
         game_client.set_window_state_path(state_path.join("client-window-state.json"));
 
         // Carregar configurações do usuário
-        let cache_manager =
-            cache::CacheManager::new(download_path.clone(), game_path.clone(), state_path.clone());
-        let disable_auto_start = cache_manager
-            .load_user_settings()
-            .map(|settings| settings.disable_auto_start)
-            .unwrap_or(true);
+        let disable_auto_start = user_settings.disable_auto_start;
 
         let mut launcher = Self {
-            status: "Verificando atualizações...".to_string(),
+            status: "Pronto para jogar".to_string(),
             progress: 0.0,
             download_path: download_path.clone(),
             game_path: game_path.clone(),
@@ -188,6 +207,7 @@ impl Default for GameLauncher {
             website_status: WebsiteStatus::default(),
             website_status_loading: false,
             last_website_status_refresh: None,
+            cached_website_previews_queued: false,
             boosted_creature_preview: None,
             boosted_boss_preview: None,
             boosted_creature_preview_loading_url: None,
@@ -200,8 +220,11 @@ impl Default for GameLauncher {
             selected_tab: LauncherTab::Dashboard,
             was_hidden: false,
             clients_hidden_to_tray: false,
+            clients_tray_state_initialized: false,
+            last_clients_tray_sync: None,
             tray_manager: None,
             restart_for_launcher_update: false,
+            style_configured: false,
         };
 
         // Carregar versão do client.exe
@@ -213,6 +236,13 @@ impl Default for GameLauncher {
             launcher.current_version = Some(version);
         }
 
+        if let Some(cached_status) = website_status::load_cached_status(&launcher.state_path) {
+            info!("Website status carregado do cache local");
+            launcher.website_status = cached_status;
+            launcher.website_status_loading = false;
+            launcher.last_website_status_refresh = Some(Instant::now());
+        }
+
         launcher
     }
 }
@@ -222,6 +252,84 @@ impl GameLauncher {
     fn load_client_version(&mut self) {
         self.client_version =
             ClientVersionManager::load_client_version(&self.download_path, &self.game_path);
+    }
+
+    fn current_user_settings(&self) -> cache::UserSettings {
+        cache::CacheManager::new(
+            self.download_path.clone(),
+            self.game_path.clone(),
+            self.state_path.clone(),
+        )
+        .load_user_settings()
+        .unwrap_or_else(|error| {
+            info!("Erro ao carregar configuracoes do usuario: {}", error);
+            cache::UserSettings::default()
+        })
+    }
+
+    fn save_user_settings(&self) -> Result<()> {
+        let mut settings = self.current_user_settings();
+        settings.disable_auto_start = self.disable_auto_start;
+        settings.game_path = Some(self.game_path.clone());
+
+        cache::CacheManager::new(
+            self.download_path.clone(),
+            self.game_path.clone(),
+            self.state_path.clone(),
+        )
+        .save_user_settings(&settings)
+    }
+
+    fn select_install_folder(&mut self, ctx: &egui::Context) {
+        if self.is_processing {
+            self.status = "Aguarde a operacao atual terminar antes de trocar a pasta".to_string();
+            self.temp_message_time = Some(Instant::now());
+            self.is_alert_message = true;
+            ctx.request_repaint();
+            return;
+        }
+
+        if !self.game_client.client_window_infos().is_empty() {
+            self.status = "Feche ou restaure os clientes antes de trocar a pasta".to_string();
+            self.temp_message_time = Some(Instant::now());
+            self.is_alert_message = true;
+            ctx.request_repaint();
+            return;
+        }
+
+        let Some(folder) = rfd::FileDialog::new()
+            .set_title("Select client installation folder")
+            .set_directory(&self.game_path)
+            .pick_folder()
+        else {
+            return;
+        };
+
+        if let Err(error) = self.apply_install_folder(folder) {
+            self.status = format!("Erro ao selecionar pasta: {}", error);
+            self.temp_message_time = Some(Instant::now());
+            self.is_alert_message = true;
+        } else {
+            self.status = format!("Pasta do cliente: {}", self.game_path.display());
+            self.temp_message_time = Some(Instant::now());
+            self.is_alert_message = false;
+        }
+
+        ctx.request_repaint();
+    }
+
+    fn apply_install_folder(&mut self, folder: PathBuf) -> Result<()> {
+        fs::create_dir_all(&folder)
+            .with_context(|| format!("Nao foi possivel criar {}", folder.display()))?;
+        self.game_path = folder;
+        self.config_modal = Some(ConfigModal::new(self.game_path.clone()));
+        self.load_client_version();
+        self.current_version =
+            updates::UpdateManager::load_current_version(&self.state_path, &self.game_path).ok();
+        self.save_user_settings()?;
+        self.update_sender = None;
+        self.setup_update_channel();
+        Ok(())
     }
 
     pub fn open_external_url(&mut self, url: &str) {
@@ -261,9 +369,14 @@ impl GameLauncher {
 
         if let Some(message_sender) = &self.message_sender {
             let sender = message_sender.clone();
+            let state_path = self.state_path.clone();
             tokio::spawn(async move {
                 match website_status::fetch_website_status().await {
                     Ok(status) => {
+                        if let Err(error) = website_status::save_cached_status(&state_path, &status)
+                        {
+                            info!("Falha ao salvar cache do website: {}", error);
+                        }
                         let _ = sender.send(LauncherMessage::WebsiteStatusLoaded(status));
                     }
                     Err(error) => {
@@ -307,8 +420,11 @@ impl GameLauncher {
 
         if let Some(message_sender) = &self.message_sender {
             let sender = message_sender.clone();
+            let preview_cache_dir = self.state_path.join("preview-cache");
             tokio::spawn(async move {
-                match boosted_preview::fetch_boosted_preview(url.clone()).await {
+                match boosted_preview::fetch_boosted_preview_cached(url.clone(), preview_cache_dir)
+                    .await
+                {
                     Ok(preview) => {
                         let _ = sender.send(LauncherMessage::BoostedPreviewLoaded(kind, preview));
                     }
@@ -325,15 +441,25 @@ impl GameLauncher {
     }
 
     fn refresh_offer_previews(&mut self) {
-        let urls = self
+        let previews = self
             .website_status
             .battle_pass
             .iter()
             .chain(self.website_status.pack_week.iter())
-            .flat_map(|offer| offer.previews.iter().map(|preview| preview.url.clone()))
+            .flat_map(|offer| {
+                offer.previews.iter().map(|preview| {
+                    (
+                        preview.url.clone(),
+                        preview.display_size.ceil().max(preview.tile_size.ceil()) as u32,
+                    )
+                })
+            })
             .collect::<Vec<_>>();
 
-        let active_urls = urls.iter().cloned().collect::<HashSet<_>>();
+        let active_urls = previews
+            .iter()
+            .map(|(url, _)| url.clone())
+            .collect::<HashSet<_>>();
         self.offer_preview_textures
             .retain(|url, _| active_urls.contains(url));
         self.offer_preview_errors
@@ -341,14 +467,16 @@ impl GameLauncher {
         self.offer_preview_loading_urls
             .retain(|url| active_urls.contains(url));
 
-        for url in urls {
-            self.queue_offer_preview(url);
+        for (url, max_dimension) in previews {
+            self.queue_offer_preview(url, max_dimension);
         }
     }
 
-    fn queue_offer_preview(&mut self, url: String) {
+    fn queue_offer_preview(&mut self, url: String, max_dimension: u32) {
         if self.offer_preview_textures.contains_key(&url)
             || self.offer_preview_loading_urls.contains(&url)
+            || self.offer_preview_errors.contains_key(&url)
+            || self.offer_preview_loading_urls.len() >= MAX_CONCURRENT_OFFER_PREVIEWS
         {
             return;
         }
@@ -358,8 +486,15 @@ impl GameLauncher {
 
         if let Some(message_sender) = &self.message_sender {
             let sender = message_sender.clone();
+            let preview_cache_dir = self.state_path.join("preview-cache");
             tokio::spawn(async move {
-                match boosted_preview::fetch_boosted_preview(url.clone()).await {
+                match boosted_preview::fetch_static_preview_cached(
+                    url.clone(),
+                    max_dimension,
+                    preview_cache_dir,
+                )
+                .await
+                {
                     Ok(preview) => {
                         let _ = sender.send(LauncherMessage::OfferPreviewLoaded(preview));
                     }
@@ -378,12 +513,14 @@ impl GameLauncher {
         ctx: &egui::Context,
         texture_name_prefix: &str,
         preview: BoostedPreviewData,
+        max_frames: usize,
     ) -> Result<BoostedPreviewTexture, String> {
         let url = preview.url;
         let mut total_delay_ms = 0_u32;
         let frames = preview
             .frames
             .into_iter()
+            .take(max_frames.max(1))
             .enumerate()
             .map(|(index, frame)| {
                 let color_image =
@@ -408,6 +545,7 @@ impl GameLauncher {
 
         Ok(BoostedPreviewTexture {
             url,
+            animated: frames.len() > 1,
             frames,
             total_delay_ms: total_delay_ms.max(60),
         })
@@ -433,6 +571,7 @@ impl GameLauncher {
             ctx,
             &format!("boosted-preview-{:?}", kind),
             preview,
+            usize::MAX,
         ) {
             Ok(texture) => texture,
             Err(error) => {
@@ -458,7 +597,7 @@ impl GameLauncher {
 
         let url = preview.url.clone();
         let texture_prefix = format!("offer-preview-{:x}", Self::preview_texture_key(&url));
-        match Self::texture_from_preview_data(ctx, &texture_prefix, preview) {
+        match Self::texture_from_preview_data(ctx, &texture_prefix, preview, 1) {
             Ok(texture) => {
                 self.offer_preview_textures.insert(url.clone(), texture);
                 self.offer_preview_errors.remove(&url);
@@ -552,6 +691,28 @@ impl GameLauncher {
         ctx: &egui::Context,
     ) -> Option<&BoostedPreviewTextureFrame> {
         Self::current_preview_frame(self.offer_preview_textures.get(url)?, ctx)
+    }
+
+    fn boosted_preview_is_animated(&self, kind: BoostedPreviewKind) -> bool {
+        match kind {
+            BoostedPreviewKind::Creature => self
+                .boosted_creature_preview
+                .as_ref()
+                .map(|preview| preview.animated)
+                .unwrap_or(false),
+            BoostedPreviewKind::Boss => self
+                .boosted_boss_preview
+                .as_ref()
+                .map(|preview| preview.animated)
+                .unwrap_or(false),
+        }
+    }
+
+    fn offer_preview_is_animated(&self, url: &str) -> bool {
+        self.offer_preview_textures
+            .get(url)
+            .map(|preview| preview.animated)
+            .unwrap_or(false)
     }
 
     fn current_preview_frame<'a>(
@@ -662,6 +823,7 @@ impl GameLauncher {
             tray_manager.update_hidden_client_entries(&hidden_clients);
         }
 
+        self.last_clients_tray_sync = Some(Instant::now());
         hidden_count
     }
 
@@ -676,7 +838,7 @@ impl GameLauncher {
     }
 
     fn open_minimize_client_selector(&mut self, ctx: &egui::Context) {
-        self.minimize_client_candidates = self.game_client.visible_client_window_infos();
+        self.minimize_client_candidates = self.game_client.client_window_infos();
 
         if self.minimize_client_candidates.is_empty() {
             self.show_minimize_client_modal = false;
@@ -688,6 +850,15 @@ impl GameLauncher {
         }
 
         ctx.request_repaint();
+    }
+
+    fn refresh_client_selector_candidates(&mut self) {
+        if self.show_minimize_client_modal {
+            self.minimize_client_candidates = self.game_client.client_window_infos();
+            if self.minimize_client_candidates.is_empty() {
+                self.show_minimize_client_modal = false;
+            }
+        }
     }
 
     fn minimize_client_to_tray(&mut self, ctx: &egui::Context, pid: u32) {
@@ -706,7 +877,7 @@ impl GameLauncher {
         };
         self.temp_message_time = Some(Instant::now());
         self.is_alert_message = false;
-        self.show_minimize_client_modal = false;
+        self.refresh_client_selector_candidates();
         ctx.request_repaint();
     }
 
@@ -736,6 +907,7 @@ impl GameLauncher {
 
         self.temp_message_time = Some(Instant::now());
         self.is_alert_message = false;
+        self.refresh_client_selector_candidates();
         ctx.request_repaint();
     }
 
@@ -763,6 +935,7 @@ impl GameLauncher {
 
         self.temp_message_time = Some(Instant::now());
         self.is_alert_message = false;
+        self.refresh_client_selector_candidates();
         ctx.request_repaint();
     }
 
@@ -782,15 +955,38 @@ impl GameLauncher {
 
         self.temp_message_time = Some(Instant::now());
         self.is_alert_message = false;
+        self.refresh_client_selector_candidates();
         ctx.request_repaint();
     }
 
-    fn sync_clients_tray_state(&mut self) {
-        if self.clients_hidden_to_tray {
-            let hidden_client_count = self.refresh_hidden_client_restore_menu();
-            self.clients_hidden_to_tray = hidden_client_count > 0;
-            self.set_clients_tray_icon_visible(hidden_client_count > 0);
+    fn initialize_clients_tray_state(&mut self) {
+        if self.clients_tray_state_initialized {
+            return;
         }
+
+        self.clients_tray_state_initialized = true;
+        let hidden_client_count = self.refresh_hidden_client_restore_menu();
+        self.clients_hidden_to_tray = hidden_client_count > 0;
+        self.last_clients_tray_sync = Some(Instant::now());
+        self.set_clients_tray_icon_visible(hidden_client_count > 0);
+    }
+
+    fn sync_clients_tray_state(&mut self) {
+        if !self.clients_hidden_to_tray {
+            return;
+        }
+
+        let now = Instant::now();
+        if let Some(last_sync) = self.last_clients_tray_sync {
+            if now.duration_since(last_sync) < CLIENTS_TRAY_SYNC_INTERVAL {
+                return;
+            }
+        }
+
+        let hidden_client_count = self.refresh_hidden_client_restore_menu();
+        self.clients_hidden_to_tray = hidden_client_count > 0;
+        self.last_clients_tray_sync = Some(now);
+        self.set_clients_tray_icon_visible(hidden_client_count > 0);
     }
 
     /// Verifica o ping do servidor usando TCP customizado
@@ -1090,16 +1286,18 @@ impl GameLauncher {
         }
 
         let candidates = self.minimize_client_candidates.clone();
-        let mut selected_pid = None;
+        let mut minimize_pid = None;
+        let mut restore_pid = None;
         let mut minimize_all = false;
+        let mut restore_all = false;
         let mut refresh = false;
         let mut cancel = false;
 
-        egui::Window::new("Minimizar cliente")
+        egui::Window::new("Minimizar/Restaurar clientes")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .fixed_size([420.0, 300.0])
+            .fixed_size([520.0, 340.0])
             .frame(
                 egui::Frame::window(&ctx.style())
                     .fill(egui::Color32::from_rgba_unmultiplied(20, 20, 20, 250)),
@@ -1108,14 +1306,14 @@ impl GameLauncher {
                 ui.vertical(|ui| {
                     ui.add_space(4.0);
                     ui.label(
-                        egui::RichText::new("Clientes abertos")
+                        egui::RichText::new("Clientes")
                             .size(14.0)
                             .color(egui::Color32::from_rgb(200, 200, 200)),
                     );
                     ui.add_space(6.0);
 
                     egui::ScrollArea::vertical()
-                        .max_height(190.0)
+                        .max_height(220.0)
                         .show(ui, |ui| {
                             if candidates.is_empty() {
                                 ui.label(
@@ -1132,24 +1330,74 @@ impl GameLauncher {
                                     label.push_str(&format!(" - {}", client.title));
                                 }
 
-                                if ui
-                                    .add_sized(
-                                        [ui.available_width(), 30.0],
-                                        egui::Button::new(
-                                            egui::RichText::new(label)
-                                                .size(13.0)
-                                                .color(egui::Color32::from_rgb(220, 220, 220)),
-                                        )
-                                        .fill(egui::Color32::from_rgba_unmultiplied(
-                                            45, 45, 45, 240,
-                                        ))
-                                        .corner_radius(4.0)
-                                        .stroke(egui::Stroke::NONE),
-                                    )
-                                    .clicked()
-                                {
-                                    selected_pid = Some(client.pid);
-                                }
+                                egui::Frame::new()
+                                    .fill(egui::Color32::from_rgba_unmultiplied(35, 38, 46, 220))
+                                    .corner_radius(4.0)
+                                    .inner_margin(egui::Margin::symmetric(8, 6))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.vertical(|ui| {
+                                                ui.label(
+                                                    egui::RichText::new(label)
+                                                        .size(13.0)
+                                                        .color(egui::Color32::from_rgb(
+                                                            220, 220, 220,
+                                                        )),
+                                                );
+                                                ui.label(
+                                                    egui::RichText::new(if client.visible {
+                                                        "Visivel"
+                                                    } else {
+                                                        "Na system tray"
+                                                    })
+                                                    .size(11.0)
+                                                    .color(egui::Color32::from_rgb(
+                                                        155, 165, 180,
+                                                    )),
+                                                );
+                                            });
+
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    let action_label = if client.visible {
+                                                        "Minimizar"
+                                                    } else {
+                                                        "Restaurar"
+                                                    };
+                                                    if ui
+                                                        .add_sized(
+                                                            [94.0, 28.0],
+                                                            egui::Button::new(
+                                                                egui::RichText::new(action_label)
+                                                                    .size(13.0)
+                                                                    .color(
+                                                                        egui::Color32::from_rgb(
+                                                                            220, 220, 220,
+                                                                        ),
+                                                                    ),
+                                                            )
+                                                            .fill(
+                                                                egui::Color32::from_rgba_unmultiplied(
+                                                                    45, 45, 45, 255,
+                                                                ),
+                                                            )
+                                                            .corner_radius(2.0)
+                                                            .stroke(egui::Stroke::NONE),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        if client.visible {
+                                                            minimize_pid = Some(client.pid);
+                                                        } else {
+                                                            restore_pid = Some(client.pid);
+                                                        }
+                                                    }
+                                                },
+                                            );
+                                        });
+                                    });
+                                ui.add_space(6.0);
                             }
                         });
 
@@ -1174,9 +1422,9 @@ impl GameLauncher {
 
                         if ui
                             .add_sized(
-                                [80.0, 28.0],
+                                [120.0, 28.0],
                                 egui::Button::new(
-                                    egui::RichText::new("Todos")
+                                    egui::RichText::new("Min. visiveis")
                                         .size(13.0)
                                         .color(egui::Color32::from_rgb(220, 220, 220)),
                                 )
@@ -1187,6 +1435,23 @@ impl GameLauncher {
                             .clicked()
                         {
                             minimize_all = true;
+                        }
+
+                        if ui
+                            .add_sized(
+                                [120.0, 28.0],
+                                egui::Button::new(
+                                    egui::RichText::new("Rest. tray")
+                                        .size(13.0)
+                                        .color(egui::Color32::from_rgb(220, 220, 220)),
+                                )
+                                .fill(egui::Color32::from_rgba_unmultiplied(45, 45, 45, 255))
+                                .corner_radius(2.0)
+                                .stroke(egui::Stroke::NONE),
+                            )
+                            .clicked()
+                        {
+                            restore_all = true;
                         }
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1211,13 +1476,16 @@ impl GameLauncher {
                 });
             });
 
-        if let Some(pid) = selected_pid {
+        if let Some(pid) = minimize_pid {
             self.minimize_client_to_tray(ctx, pid);
+        } else if let Some(pid) = restore_pid {
+            self.restore_client_from_tray(ctx, pid);
         } else if minimize_all {
-            self.show_minimize_client_modal = false;
             self.minimize_clients_to_tray(ctx);
+        } else if restore_all {
+            self.restore_clients_from_tray(ctx);
         } else if refresh {
-            self.minimize_client_candidates = self.game_client.visible_client_window_infos();
+            self.minimize_client_candidates = self.game_client.client_window_infos();
             ctx.request_repaint();
         } else if cancel {
             self.show_minimize_client_modal = false;
@@ -1252,10 +1520,26 @@ impl GameLauncher {
         }
     }
 
+    fn configure_style_once(&mut self, ctx: &egui::Context) {
+        if self.style_configured {
+            return;
+        }
+
+        let mut style = (*ctx.style()).clone();
+        style.spacing.item_spacing = egui::vec2(10.0, 10.0);
+        style.visuals.window_shadow = egui::Shadow {
+            offset: [0, 20],
+            blur: style.visuals.window_shadow.blur,
+            spread: style.visuals.window_shadow.spread,
+            color: style.visuals.window_shadow.color,
+        };
+        ctx.set_style(style);
+        self.style_configured = true;
+    }
+
     fn custom_update(&mut self, ctx: &egui::Context) {
         // === Fast path: quando a janela está escondida no tray, fazer apenas trabalho essencial ===
         self.handle_tray_events(ctx);
-        self.sync_clients_tray_state();
 
         let (is_visible, recently_shown) = {
             let state = self.window_state.lock().unwrap();
@@ -1292,8 +1576,14 @@ impl GameLauncher {
                             self.ping_in_progress = false;
                         }
                         LauncherMessage::WebsiteStatusLoaded(status) => {
+                            if let Err(error) =
+                                website_status::save_cached_status(&self.state_path, &status)
+                            {
+                                info!("Falha ao salvar cache do website: {}", error);
+                            }
                             self.website_status = status;
                             self.website_status_loading = false;
+                            self.cached_website_previews_queued = false;
                         }
                         LauncherMessage::WebsiteStatusError(error) => {
                             self.website_status_loading = false;
@@ -1414,6 +1704,14 @@ impl GameLauncher {
             ctx.request_repaint();
         }
 
+        if !self.startup_splash_finished {
+            self.render_central_panel(ctx, ctx.available_rect().size());
+            return;
+        }
+
+        self.initialize_clients_tray_state();
+        self.sync_clients_tray_state();
+
         // === Caminho normal: janela visível ===
 
         // Verificar ping do servidor periodicamente
@@ -1452,144 +1750,162 @@ impl GameLauncher {
             let message_sender = self.message_sender.clone();
             let disable_auto_start = self.disable_auto_start; // Capturar o estado do checkbox
 
-            tokio::spawn(async move {
-                // Atualizar o status para "Verificando atualizações"
-                if let Some(sender) = message_sender.clone() {
-                    let _ = sender.send(LauncherMessage::SetStatus(
-                        "Verificando atualizações...".to_string(),
-                    ));
-                    let _ = sender.send(LauncherMessage::SetProcessing(true));
-                }
-
-                info!("Verificando atualizações iniciais...");
-                if let Some(sender) = message_sender.clone() {
-                    let launcher_update_manager = launcher_update::LauncherUpdateManager::new(
-                        download_path.clone(),
-                        state_path.clone(),
-                    );
-
-                    match launcher_update_manager
-                        .update_launcher_if_available(sender.clone())
-                        .await
-                    {
-                        Ok(true) => {
-                            info!("Update do launcher encontrado; reiniciando para aplicar");
-                            return;
+            if false {
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(6)).await;
+                    info!("Verificando atualizacoes do cliente em segundo plano...");
+                    if false {
+                        // Atualizar o status para "Verificando atualizações"
+                        if let Some(sender) = message_sender.clone() {
+                            let _ = sender.send(LauncherMessage::SetStatus(
+                                "Verificando atualizações...".to_string(),
+                            ));
+                            let _ = sender.send(LauncherMessage::SetProcessing(true));
                         }
-                        Ok(false) => {
-                            info!("Launcher ja esta atualizado");
+
+                        info!("Verificando atualizações iniciais...");
+                        if let Some(sender) = message_sender.clone() {
+                            let launcher_update_manager =
+                                launcher_update::LauncherUpdateManager::new(
+                                    download_path.clone(),
+                                    state_path.clone(),
+                                );
+
+                            match launcher_update_manager
+                                .update_launcher_if_available(sender.clone())
+                                .await
+                            {
+                                Ok(true) => {
+                                    info!(
+                                        "Update do launcher encontrado; reiniciando para aplicar"
+                                    );
+                                    return;
+                                }
+                                Ok(false) => {
+                                    info!("Launcher ja esta atualizado");
+                                }
+                                Err(error) => {
+                                    info!(
+                                        "Falha ao verificar update automatico do launcher: {:#}",
+                                        error
+                                    );
+                                }
+                            }
                         }
-                        Err(error) => {
-                            info!(
-                                "Falha ao verificar update automatico do launcher: {:#}",
-                                error
-                            );
+
+                        if let Some(sender) = message_sender.clone() {
+                            let _ = sender.send(LauncherMessage::SetStatus(
+                                "Verificando atualizacoes...".to_string(),
+                            ));
+                            let _ = sender.send(LauncherMessage::DownloadProgress(0.0));
+                            let _ = sender.send(LauncherMessage::SetProcessing(true));
                         }
                     }
-                }
 
-                if let Some(sender) = message_sender.clone() {
-                    let _ = sender.send(LauncherMessage::SetStatus(
-                        "Verificando atualizacoes...".to_string(),
-                    ));
-                    let _ = sender.send(LauncherMessage::DownloadProgress(0.0));
-                    let _ = sender.send(LauncherMessage::SetProcessing(true));
-                }
-
-                match updates::UpdateManager::check_initial_updates(&game_path, &state_path).await {
-                    Ok(needs_update) => {
-                        if needs_update {
-                            info!("Atualização encontrada! Mostrando launcher...");
-                            // Mostrar janela do launcher pois precisa atualizar
-                            if let Some(sender) = message_sender.clone() {
-                                sender
-                                    .send(LauncherMessage::SetStatus(
-                                        "Nova versão disponível. Iniciando download...".to_string(),
-                                    ))
-                                    .ok();
-
-                                sender
-                                    .send(LauncherMessage::UpdateAvailable(
-                                        "Nova versão disponível".to_string(),
-                                    ))
-                                    .ok();
-
-                                sender.send(LauncherMessage::SetProcessing(true)).ok();
-
-                                // Iniciar o download automaticamente
-                                let game_path = game_path.clone();
-                                let state_path = state_path.clone();
-                                let message_tx = sender.clone();
-
-                                tokio::spawn(async move {
-                                    let update_manager = updates::UpdateManager::new(
-                                        download_path,
-                                        game_path,
-                                        state_path,
-                                    );
-                                    if let Err(e) = update_manager
-                                        .check_for_updates(message_tx.clone(), disable_auto_start)
-                                        .await
-                                    {
-                                        let _ = message_tx.send(LauncherMessage::Error(format!(
-                                            "Erro ao iniciar download automático: {:#}",
-                                            e
-                                        )));
-                                        info!("Erro ao iniciar download automático: {}", e);
-                                    }
-                                });
-                            }
-                        } else {
-                            info!("Nenhuma atualização encontrada!");
-
-                            // Só inicia automaticamente se disable_auto_start for false
-                            if !disable_auto_start {
-                                info!("Iniciando o cliente automaticamente...");
-                                // Atualizar o status para "Iniciando o Cliente"
+                    match updates::UpdateManager::check_initial_updates(&game_path, &state_path)
+                        .await
+                    {
+                        Ok(needs_update) => {
+                            if needs_update {
+                                info!("Atualização encontrada! Mostrando launcher...");
+                                // Mostrar janela do launcher pois precisa atualizar
                                 if let Some(sender) = message_sender.clone() {
                                     sender
                                         .send(LauncherMessage::SetStatus(
-                                            "Iniciando o Cliente...".to_string(),
+                                            "Nova versão disponível. Iniciando download..."
+                                                .to_string(),
                                         ))
                                         .ok();
-                                }
 
-                                // Pequeno delay para que o usuário veja a mensagem
-                                tokio::time::sleep(Duration::from_millis(800)).await;
+                                    sender
+                                        .send(LauncherMessage::UpdateAvailable(
+                                            "Nova versão disponível".to_string(),
+                                        ))
+                                        .ok();
 
-                                // Iniciar o jogo
-                                if let Some(sender) = message_sender {
-                                    sender.send(LauncherMessage::LaunchGame).ok();
+                                    sender.send(LauncherMessage::SetProcessing(true)).ok();
+
+                                    // Iniciar o download automaticamente
+                                    let game_path = game_path.clone();
+                                    let state_path = state_path.clone();
+                                    let message_tx = sender.clone();
+
+                                    tokio::spawn(async move {
+                                        let update_manager = updates::UpdateManager::new(
+                                            download_path,
+                                            game_path,
+                                            state_path,
+                                        );
+                                        if let Err(e) = update_manager
+                                            .check_for_updates(
+                                                message_tx.clone(),
+                                                disable_auto_start,
+                                            )
+                                            .await
+                                        {
+                                            let _ =
+                                                message_tx.send(LauncherMessage::Error(format!(
+                                                    "Erro ao iniciar download automático: {:#}",
+                                                    e
+                                                )));
+                                            info!("Erro ao iniciar download automático: {}", e);
+                                        }
+                                    });
                                 }
                             } else {
-                                info!("Início automático desativado pelo usuário");
-                                if let Some(sender) = message_sender {
-                                    sender
-                                        .send(LauncherMessage::SetStatus(
-                                            "Pronto para jogar".to_string(),
-                                        ))
-                                        .ok();
-                                    sender.send(LauncherMessage::SetProcessing(false)).ok();
+                                info!("Nenhuma atualização encontrada!");
+
+                                // Só inicia automaticamente se disable_auto_start for false
+                                if !disable_auto_start {
+                                    info!("Iniciando o cliente automaticamente...");
+                                    // Atualizar o status para "Iniciando o Cliente"
+                                    if let Some(sender) = message_sender.clone() {
+                                        sender
+                                            .send(LauncherMessage::SetStatus(
+                                                "Iniciando o Cliente...".to_string(),
+                                            ))
+                                            .ok();
+                                    }
+
+                                    // Pequeno delay para que o usuário veja a mensagem
+                                    tokio::time::sleep(Duration::from_millis(800)).await;
+
+                                    // Iniciar o jogo
+                                    if let Some(sender) = message_sender {
+                                        sender.send(LauncherMessage::LaunchGame).ok();
+                                    }
+                                } else {
+                                    info!("Início automático desativado pelo usuário");
+                                    if let Some(sender) = message_sender {
+                                        sender
+                                            .send(LauncherMessage::SetStatus(
+                                                "Pronto para jogar".to_string(),
+                                            ))
+                                            .ok();
+                                        sender.send(LauncherMessage::SetProcessing(false)).ok();
+                                    }
                                 }
                             }
                         }
-                    }
-                    Err(e) => {
-                        info!("Erro ao verificar atualizações: {}", e);
-                        // Em caso de erro, mostrar o launcher para o usuário
-                        game_client::show_window(&window_state);
-                        needs_repaint.store(true, Ordering::SeqCst);
-                        if let Some(sender) = message_sender {
-                            sender
-                                .send(LauncherMessage::Error(format!(
-                                    "Erro ao verificar atualizações: {}",
-                                    e
-                                )))
-                                .ok();
+                        Err(e) => {
+                            info!("Erro ao verificar atualizações: {}", e);
+                            // Em caso de erro, mostrar o launcher para o usuário
+                            game_client::show_window(&window_state);
+                            needs_repaint.store(true, Ordering::SeqCst);
+                            if let Some(sender) = message_sender {
+                                sender
+                                    .send(LauncherMessage::Error(format!(
+                                        "Erro ao verificar atualizações: {}",
+                                        e
+                                    )))
+                                    .ok();
+                            }
                         }
                     }
-                }
-            });
+                });
+            }
+            self.status = "Pronto para jogar".to_string();
+            self.is_processing = false;
         }
 
         // Verificar se há uma mensagem temporária que deve ser limpa
@@ -1638,13 +1954,9 @@ impl GameLauncher {
             }
         }
 
-        // Atualiza clients que terminaram
-        self.game_client.update_additional_clients();
-        self.sync_clients_tray_state();
-
         // Atualizar status com base nos clientes ativos e o cliente principal
-        let is_game_running = self.is_game_running();
-        let (_, additional_count) = self.game_client.sync_client_state();
+        let (is_game_running, additional_count) = self.game_client.sync_client_state();
+        self.sync_clients_tray_state();
 
         // Não atualizar o status se houver uma mensagem temporária
         if !self.temp_message_time.is_some() {
@@ -1664,7 +1976,7 @@ impl GameLauncher {
         }
 
         // Atualiza status do jogo principal
-        if !self.game_client.is_main_client_running() && self.status.contains("em execu") {
+        if !is_game_running && self.status.contains("em execu") {
             self.status = "Pronto para jogar".to_string();
             self.is_processing = false;
             self.restore_launcher_from_tray(ctx);
@@ -1682,8 +1994,11 @@ impl GameLauncher {
             self.setup_update_channel();
         }
         self.refresh_website_status();
-        self.refresh_boosted_previews();
-        self.refresh_offer_previews();
+        if !self.cached_website_previews_queued && self.website_status.fetched_at.is_some() {
+            self.cached_website_previews_queued = true;
+            self.refresh_boosted_previews();
+            self.refresh_offer_previews();
+        }
 
         if let Some(receiver) = &mut self.message_receiver {
             // Coletar todas as mensagens disponíveis em um vetor
@@ -1758,8 +2073,14 @@ impl GameLauncher {
                             self.ping_in_progress = false;
                         }
                         LauncherMessage::WebsiteStatusLoaded(status) => {
+                            if let Err(error) =
+                                website_status::save_cached_status(&self.state_path, &status)
+                            {
+                                info!("Falha ao salvar cache do website: {}", error);
+                            }
                             self.website_status = status;
                             self.website_status_loading = false;
+                            self.cached_website_previews_queued = true;
                             self.refresh_boosted_previews();
                             self.refresh_offer_previews();
                         }
@@ -1774,9 +2095,11 @@ impl GameLauncher {
                         }
                         LauncherMessage::OfferPreviewLoaded(preview) => {
                             self.apply_offer_preview(ctx, preview);
+                            self.refresh_offer_previews();
                         }
                         LauncherMessage::OfferPreviewError(url, error) => {
                             self.apply_offer_preview_error(url, error);
+                            self.refresh_offer_previews();
                         }
                         LauncherMessage::RestartLauncherForUpdate => {
                             self.restart_launcher_for_update(ctx);
@@ -1787,18 +2110,20 @@ impl GameLauncher {
             }
         }
 
-        // Configurar tema escuro moderno
-        let mut style = (*ctx.style()).clone();
-        style.spacing.item_spacing = egui::vec2(10.0, 10.0);
+        self.configure_style_once(ctx);
+        /*
+            let mut style = (*ctx.style()).clone();
+            style.spacing.item_spacing = egui::vec2(10.0, 10.0);
 
-        // Ajustar apenas a sombra da janela, que é acessível
-        style.visuals.window_shadow = egui::Shadow {
-            offset: [0, 20], // Sombra deslocada 20 pixels para baixo
-            blur: style.visuals.window_shadow.blur,
-            spread: style.visuals.window_shadow.spread,
-            color: style.visuals.window_shadow.color,
-        };
-        ctx.set_style(style);
+            // Ajustar apenas a sombra da janela, que é acessível
+            style.visuals.window_shadow = egui::Shadow {
+                offset: [0, 20], // Sombra deslocada 20 pixels para baixo
+                blur: style.visuals.window_shadow.blur,
+                spread: style.visuals.window_shadow.spread,
+                color: style.visuals.window_shadow.color,
+            };
+            ctx.set_style(style);
+        */
 
         // Pegar o tamanho da janela para responsividade
         let available_size = ctx.available_rect().size();
@@ -1955,7 +2280,65 @@ impl GameLauncher {
         }
     }
 
+    fn load_texture_from_memory(
+        ctx: &egui::Context,
+        name: &str,
+        bytes: &[u8],
+        max_dimension: Option<u32>,
+        options: egui::TextureOptions,
+    ) -> Option<egui::TextureHandle> {
+        let image_data = image::load_from_memory(bytes).ok()?;
+        let mut image = image_data.into_rgba8();
+        if let Some(max_dimension) = max_dimension {
+            let (width, height) = image.dimensions();
+            let longest = width.max(height);
+            if longest > max_dimension {
+                let scale = max_dimension as f32 / longest as f32;
+                let resized_width = ((width as f32 * scale).round() as u32).max(1);
+                let resized_height = ((height as f32 * scale).round() as u32).max(1);
+                image = image::imageops::resize(
+                    &image,
+                    resized_width,
+                    resized_height,
+                    image::imageops::FilterType::Lanczos3,
+                );
+            }
+        }
+
+        let (width, height) = image.dimensions();
+        let rgba = image.into_raw();
+        let texture =
+            egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba);
+        info!("Textura {} carregada em {}x{}", name, width, height);
+        Some(ctx.load_texture(name, texture, options))
+    }
+
     fn load_background(&mut self, ctx: &egui::Context) {
+        self.background_texture = Self::load_texture_from_memory(
+            ctx,
+            "background",
+            include_bytes!("../assets/website-background.jpg"),
+            Some(1024),
+            egui::TextureOptions::LINEAR,
+        );
+        self.logo_texture = Self::load_texture_from_memory(
+            ctx,
+            "logo",
+            include_bytes!("../assets/penultima-phoenix.png"),
+            Some(360),
+            egui::TextureOptions::LINEAR,
+        );
+        self.splash_logo_texture = Self::load_texture_from_memory(
+            ctx,
+            "splash-logo",
+            include_bytes!("../assets/ultima-website-logo.png"),
+            Some(512),
+            egui::TextureOptions::LINEAR,
+        );
+    }
+
+    /*
+
         // Carregar o papel de parede
         if let Ok(image_data) =
             image::load_from_memory(include_bytes!("../assets/website-background.jpg"))
@@ -2017,6 +2400,7 @@ impl GameLauncher {
         }
     }
 
+        */
     fn render_central_panel(&mut self, ctx: &egui::Context, available_size: egui::Vec2) {
         if !self.startup_splash_finished {
             ui_components::render_startup_splash(self, ctx, available_size);
@@ -2145,6 +2529,9 @@ async fn main() -> Result<()> {
 
             let mut launcher = GameLauncher::default();
             launcher.game_client = GameClient::new();
+            launcher
+                .game_client
+                .set_window_state_path(launcher.state_path.join("client-window-state.json"));
             launcher.window_state = window_state;
             launcher.initialized = false;
             launcher.auto_hide = args.auto_hide;

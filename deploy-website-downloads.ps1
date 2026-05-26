@@ -1,13 +1,15 @@
 param(
   [string]$LauncherRoot = "D:\Server\Launcher",
   [string]$ClientRoot = "D:\Server\Cliente-15.23-Prod",
+  [string]$WorldRoot = "D:\Server\Penultima-Server\data-otservbr-global\world",
   [string]$WebsiteRoot = "D:\Server\UniServerZ\www",
   [switch]$AllowUnsignedLauncher,
   [string]$CertificateThumbprint = $env:PENULTIMA_SIGN_CERT_THUMBPRINT,
   [string]$CertificatePath = $env:PENULTIMA_SIGN_CERT_PATH,
   [string]$CertificatePassword = $env:PENULTIMA_SIGN_CERT_PASSWORD,
   [switch]$SkipClient,
-  [switch]$SkipLauncher
+  [switch]$SkipLauncher,
+  [switch]$SkipFullMinimap
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,6 +33,35 @@ function Test-HasCertificateConfig {
   return (-not [string]::IsNullOrWhiteSpace($Thumbprint)) -or (-not [string]::IsNullOrWhiteSpace($Path))
 }
 
+function Copy-FullMapAssetFiles {
+  param(
+    [string]$SourceRoot,
+    [string]$DestinationRoot
+  )
+
+  if ([string]::IsNullOrWhiteSpace($SourceRoot) -or -not (Test-Path -LiteralPath $SourceRoot)) {
+    return 0
+  }
+
+  $patterns = @(
+    "minimap-*",
+    "satellite-*",
+    "map-*",
+    "staticdata-*",
+    "staticmapdata-*"
+  )
+
+  $copied = 0
+  foreach ($pattern in $patterns) {
+    Get-ChildItem -LiteralPath $SourceRoot -File -Filter $pattern -ErrorAction SilentlyContinue | ForEach-Object {
+      Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $DestinationRoot $_.Name) -Force
+      $copied++
+    }
+  }
+
+  return $copied
+}
+
 if (-not (Test-Path $LauncherRoot)) {
   throw "Launcher root not found: $LauncherRoot"
 }
@@ -47,6 +78,7 @@ $downloadsRoot = Join-Path $WebsiteRoot "downloads"
 $feedRoot = Join-Path $downloadsRoot "client-feed"
 $bootstrapZipPath = Join-Path $downloadsRoot "Penultima-Client-Feed.zip"
 $portableZipPath = Join-Path $downloadsRoot "Penultima-Client-Portable.zip"
+$fullMinimapZipPath = Join-Path $downloadsRoot "Penultima-Full-Minimap.zip"
 $launcherZipPath = Join-Path $downloadsRoot "Penultima-Launcher.zip"
 $launcherReleaseDir = Join-Path (Join-Path (Split-Path -Parent $LauncherRoot) "_publish") "penultima-launcher-release"
 $publishLauncherScript = Join-Path $LauncherRoot "publish-launcher-release.ps1"
@@ -105,6 +137,30 @@ if (-not $SkipLauncher) {
   Copy-Item -LiteralPath $launcherZipPath -Destination $launcherVersionedZipPath -Force
 }
 
+if (-not $SkipFullMinimap) {
+  $minimapRoot = Join-Path $ClientRoot "minimap"
+  if (-not (Test-Path -LiteralPath $minimapRoot)) {
+    throw "Client minimap directory not found: $minimapRoot"
+  }
+
+  $clientAssetsRoot = Join-Path $ClientRoot "assets"
+  $minimapTempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("penultima-full-minimap-" + [System.Guid]::NewGuid().ToString("N"))
+  $minimapTempPayload = Join-Path $minimapTempRoot "minimap"
+  $assetsTempPayload = Join-Path $minimapTempRoot "assets"
+  New-Item -ItemType Directory -Path $minimapTempPayload -Force | Out-Null
+  New-Item -ItemType Directory -Path $assetsTempPayload -Force | Out-Null
+  Copy-Item -Path (Join-Path $minimapRoot "*") -Destination $minimapTempPayload -Recurse -Force
+  [void](Copy-FullMapAssetFiles -SourceRoot $clientAssetsRoot -DestinationRoot $assetsTempPayload)
+  [void](Copy-FullMapAssetFiles -SourceRoot $WorldRoot -DestinationRoot $assetsTempPayload)
+
+  if (Test-Path -LiteralPath $fullMinimapZipPath) {
+    Remove-Item -LiteralPath $fullMinimapZipPath -Force
+  }
+
+  Compress-Archive -Path (Join-Path $minimapTempRoot "*") -DestinationPath $fullMinimapZipPath -CompressionLevel Optimal -Force
+  Remove-Item -LiteralPath $minimapTempRoot -Recurse -Force
+}
+
 $launcherExePath = Join-Path $launcherReleaseDir "penultima-launcher.exe"
 $launcherSignatureStatus = $null
 $launcherSigned = $null
@@ -156,11 +212,44 @@ if (Test-Path $bootstrapZipPath) {
   }
 }
 
+$fullMinimapMetadata = $null
+if (Test-Path $fullMinimapZipPath) {
+  $minimapRoot = Join-Path $ClientRoot "minimap"
+  $minimapFileCount = if (Test-Path -LiteralPath $minimapRoot) {
+    (Get-ChildItem -LiteralPath $minimapRoot -Recurse -File | Measure-Object).Count
+  } else {
+    0
+  }
+  $clientAssetsRoot = Join-Path $ClientRoot "assets"
+  $assetPatterns = @("minimap-*", "satellite-*", "map-*", "staticdata-*", "staticmapdata-*")
+  $assetNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  foreach ($sourceRoot in @($clientAssetsRoot, $WorldRoot)) {
+    if (Test-Path -LiteralPath $sourceRoot) {
+      foreach ($pattern in $assetPatterns) {
+        Get-ChildItem -LiteralPath $sourceRoot -File -Filter $pattern -ErrorAction SilentlyContinue | ForEach-Object {
+          [void]$assetNames.Add($_.Name)
+        }
+      }
+    }
+  }
+  $assetFileCount = $assetNames.Count
+
+  $fullMinimapMetadata = [ordered]@{
+    zip = "downloads/Penultima-Full-Minimap.zip"
+    sha256 = (Get-FileHash $fullMinimapZipPath -Algorithm SHA256).Hash
+    size = (Get-Item $fullMinimapZipPath).Length
+    file_count = $minimapFileCount + $assetFileCount
+    minimap_file_count = $minimapFileCount
+    asset_file_count = $assetFileCount
+  }
+}
+
 $metadata = [ordered]@{
   generated_at_utc = (Get-Date).ToUniversalTime().ToString("o")
   launcher = $launcherMetadata
   portable_client = $portableMetadata
   client_feed = $clientFeedMetadata
+  full_minimap = $fullMinimapMetadata
 }
 
 $metadataJson = $metadata | ConvertTo-Json -Depth 6

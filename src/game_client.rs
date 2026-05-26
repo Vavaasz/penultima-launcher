@@ -9,7 +9,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::ptr::null;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use winapi::shared::minwindef::{BOOL, LPARAM, TRUE};
 use winapi::shared::windef::{HWND, RECT};
 use winapi::um::shellapi::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
@@ -24,6 +24,7 @@ use windows::Win32::System::Threading::{GetExitCodeProcess, GetProcessId, WaitFo
 
 const CLIENT_WINDOW_TITLE_PREFIX: &str = "Tibia - ";
 const OTCLIENT_LAUNCHER_EXE: &str = "OTCLauncher.exe";
+const CLIENT_STATE_CACHE_DURATION: Duration = Duration::from_millis(2000);
 
 pub struct WindowState {
     pub visible: bool,
@@ -172,6 +173,7 @@ pub struct GameClient {
     window_state_path: Option<PathBuf>,
     last_window_state: Option<ClientWindowState>,
     pending_window_restore_pids: HashSet<u32>,
+    last_sync_state: Option<(Instant, bool, usize)>,
 }
 
 impl Default for GameClient {
@@ -182,6 +184,7 @@ impl Default for GameClient {
             window_state_path: None,
             last_window_state: None,
             pending_window_restore_pids: HashSet::new(),
+            last_sync_state: None,
         }
     }
 }
@@ -223,11 +226,12 @@ impl GameClient {
 
         self.pending_window_restore_pids.insert(process.pid);
         self.game_process = Some(process);
+        self.invalidate_client_state_cache();
         Ok(())
     }
 
     pub fn launch_additional_client(&mut self, game_path: &PathBuf) -> Result<()> {
-        self.update_additional_clients();
+        self.sync_client_state_now();
 
         let client_path = Self::find_client_path(game_path)?;
         let process =
@@ -236,11 +240,12 @@ impl GameClient {
         info!("Cliente adicional iniciado com PID {}", process.pid);
         self.pending_window_restore_pids.insert(process.pid);
         self.active_clients.push(process);
+        self.invalidate_client_state_cache();
         Ok(())
     }
 
     pub fn launch_otclient_launcher(&mut self, launcher_path: &PathBuf) -> Result<()> {
-        self.update_additional_clients();
+        self.sync_client_state_now();
 
         if !launcher_path.exists() {
             return Err(anyhow!("OTCLauncher.exe nao encontrado"));
@@ -262,6 +267,7 @@ impl GameClient {
         info!("OTClient launcher iniciado com PID {}", process.pid);
         self.pending_window_restore_pids.insert(process.pid);
         self.active_clients.push(process);
+        self.invalidate_client_state_cache();
         Ok(())
     }
 
@@ -284,16 +290,21 @@ impl GameClient {
             .filter(|client| !client.is_running())
             .map(|client| client.pid)
             .collect();
+        let had_closed_clients = !closed_pids.is_empty();
         for pid in closed_pids {
             self.pending_window_restore_pids.remove(&pid);
         }
         self.active_clients.retain(|client| client.is_running());
+        if had_closed_clients {
+            self.invalidate_client_state_cache();
+        }
     }
 
     pub fn terminate_all_processes(&mut self) {
         self.active_clients.clear();
         self.game_process = None;
         self.pending_window_restore_pids.clear();
+        self.invalidate_client_state_cache();
     }
 
     pub fn get_clients_count(&self) -> (bool, usize) {
@@ -301,11 +312,23 @@ impl GameClient {
     }
 
     pub fn sync_client_state(&mut self) -> (bool, usize) {
+        if let Some((synced_at, has_main, additional_count)) = self.last_sync_state {
+            if synced_at.elapsed() < CLIENT_STATE_CACHE_DURATION {
+                return (has_main, additional_count);
+            }
+        }
+
+        self.sync_client_state_now()
+    }
+
+    pub fn sync_client_state_now(&mut self) -> (bool, usize) {
         let has_main = self.is_main_client_running();
         self.update_additional_clients();
         self.restore_pending_client_window_states();
         self.remember_current_client_window_state();
-        (has_main, self.active_clients.len())
+        let state = (has_main, self.active_clients.len());
+        self.last_sync_state = Some((Instant::now(), state.0, state.1));
+        state
     }
 
     pub fn has_tracked_clients(&mut self) -> bool {
@@ -314,7 +337,7 @@ impl GameClient {
     }
 
     pub fn visible_client_window_infos(&mut self) -> Vec<ClientWindowInfo> {
-        self.sync_client_state();
+        self.sync_client_state_now();
         unique_client_window_infos(
             self.all_client_window_details()
                 .into_iter()
@@ -340,7 +363,7 @@ impl GameClient {
     }
 
     fn minimize_client_windows_to_tray(&mut self, pid: Option<u32>) -> usize {
-        self.sync_client_state();
+        self.sync_client_state_now();
         let mut hidden_pids = HashSet::new();
         for client_window in self.all_client_window_details() {
             if pid.is_some_and(|target_pid| client_window.info.pid != target_pid) {
@@ -359,7 +382,7 @@ impl GameClient {
     }
 
     pub fn restore_clients_from_tray(&mut self) -> usize {
-        self.sync_client_state();
+        self.sync_client_state_now();
 
         let mut restored_pids = HashSet::new();
         for client_window in self.all_client_window_details() {
@@ -379,7 +402,7 @@ impl GameClient {
     }
 
     pub fn restore_client_from_tray(&mut self, pid: u32) -> Option<ClientWindowInfo> {
-        self.sync_client_state();
+        self.sync_client_state_now();
 
         let mut restored_client = None;
         for client_window in self.all_client_window_details() {
@@ -402,7 +425,7 @@ impl GameClient {
     }
 
     pub fn hidden_client_window_infos(&mut self) -> Vec<ClientWindowInfo> {
-        self.sync_client_state();
+        self.sync_client_state_now();
         unique_client_window_infos(
             self.all_client_window_details()
                 .into_iter()
@@ -410,6 +433,15 @@ impl GameClient {
                 .map(|client_window| client_window.info)
                 .collect(),
         )
+    }
+
+    pub fn client_window_infos(&mut self) -> Vec<ClientWindowInfo> {
+        self.sync_client_state_now();
+        self.all_client_window_infos()
+    }
+
+    fn invalidate_client_state_cache(&mut self) {
+        self.last_sync_state = None;
     }
 
     fn all_client_window_infos(&self) -> Vec<ClientWindowInfo> {

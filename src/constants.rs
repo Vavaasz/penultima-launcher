@@ -59,6 +59,13 @@ pub const DOWNLOADS_METADATA_URL: &str =
 pub const CLIENT_GITHUB_ARCHIVE_URL: &str =
     "https://codeload.github.com/Vavaasz/penultima-client/zip/refs/heads/main";
 
+/// Optional full minimap package installed into the selected client folder.
+pub const FULL_MINIMAP_ARCHIVE_URL: &str =
+    "https://ultimaotserv.online/downloads/Penultima-Full-Minimap.zip";
+
+/// Local test override for the full minimap package URL.
+pub const FULL_MINIMAP_URL_ENV: &str = "PENULTIMA_FULL_MINIMAP_URL";
+
 /// Slug do Partner Launcher OTCRP usado pelo Penultima
 pub const OTCRP_PARTNER_SLUG: &str = "penultima";
 
@@ -167,7 +174,7 @@ pub const PING_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 pub const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 pub const HTTP_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 pub const WEBSITE_STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
-pub const STARTUP_SPLASH_DURATION: Duration = Duration::from_millis(3000);
+pub const STARTUP_SPLASH_DURATION: Duration = Duration::from_millis(1200);
 
 /// Intervalo para verificação de instâncias
 pub const INSTANCE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
@@ -185,7 +192,7 @@ pub const HIDDEN_REPAINT_INTERVAL: Duration = Duration::from_secs(2);
 pub const TRAY_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 /// Intervalo de repaint quando a janela está visível mas ociosa
-pub const IDLE_REPAINT_INTERVAL: Duration = Duration::from_millis(400);
+pub const IDLE_REPAINT_INTERVAL: Duration = Duration::from_millis(1000);
 
 /// Duração mínima entre exibições de mensagens
 pub const MESSAGE_DISPLAY_INTERVAL: Duration = Duration::from_secs(2);

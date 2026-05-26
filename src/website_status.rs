@@ -3,13 +3,16 @@ use chrono::{Local, NaiveDateTime};
 use futures_util::future::join_all;
 use regex::Regex;
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::Path;
 
 use crate::constants::{
     BATTLE_PASS_URL, CHANGELOG_URL, EVENT_CALENDAR_URL, HTTP_REQUEST_TIMEOUT, INVESTMENT_URL,
     PACK_WEEK_URL, WEBSITE_BASE_URL,
 };
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WebsiteStatus {
     pub online_players: Option<u32>,
     pub boosted_creature: Option<String>,
@@ -26,13 +29,13 @@ pub struct WebsiteStatus {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventSummary {
     pub name: String,
     pub window: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OfferSummary {
     pub title: String,
     pub subtitle: Option<String>,
@@ -40,7 +43,7 @@ pub struct OfferSummary {
     pub previews: Vec<OfferPreview>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OfferPreview {
     pub title: String,
     pub url: String,
@@ -48,7 +51,7 @@ pub struct OfferPreview {
     pub display_size: f32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvestorSummary {
     pub name: String,
     pub invested: String,
@@ -56,12 +59,33 @@ pub struct InvestorSummary {
     pub remaining: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChangelogEntry {
     pub kind: String,
     pub area: String,
     pub date: String,
     pub body: String,
+}
+
+const WEBSITE_STATUS_CACHE_FILE: &str = "website-status-cache.json";
+
+pub fn load_cached_status(state_path: &Path) -> Option<WebsiteStatus> {
+    let cache_path = state_path.join(WEBSITE_STATUS_CACHE_FILE);
+    let raw = fs::read_to_string(cache_path).ok()?;
+    let mut status = serde_json::from_str::<WebsiteStatus>(&raw).ok()?;
+    status.error = None;
+    Some(status)
+}
+
+pub fn save_cached_status(state_path: &Path, status: &WebsiteStatus) -> Result<()> {
+    fs::create_dir_all(state_path)
+        .with_context(|| format!("failed to create {}", state_path.display()))?;
+    let mut cached = status.clone();
+    cached.error = None;
+    let raw = serde_json::to_string(&cached).context("failed to serialize website status cache")?;
+    fs::write(state_path.join(WEBSITE_STATUS_CACHE_FILE), raw)
+        .context("failed to write website status cache")?;
+    Ok(())
 }
 
 pub async fn fetch_website_status() -> Result<WebsiteStatus> {
@@ -328,7 +352,7 @@ fn parse_offer_previews(html: &str, limit: usize) -> Vec<OfferPreview> {
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "Reward".to_string());
 
-        let is_large_preview = url.contains("type=outfit");
+        let is_large_preview = url.contains("type=outfit") || url.contains("type=mount");
         let (tile_size, display_size) = if is_large_preview {
             (128.0, 128.0)
         } else {

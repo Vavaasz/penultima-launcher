@@ -16,6 +16,15 @@ use crate::message_system::LauncherMessage;
 use crate::website_status::{EventSummary, OfferPreview, OfferSummary};
 
 const TOP_STATUS_CARD_HEIGHT: f32 = 248.0;
+const PREVIEW_REPAINT_MIN_MS: u32 = 180;
+const PREVIEW_REPAINT_MAX_MS: u32 = 320;
+const SPLASH_REPAINT_MS: u64 = 80;
+const STATUS_REPAINT_MS: u64 = 350;
+const BACKGROUND_REPAINT_MS: u64 = 140;
+
+fn preview_repaint_delay_ms(delay_ms: u32) -> u64 {
+    delay_ms.clamp(PREVIEW_REPAINT_MIN_MS, PREVIEW_REPAINT_MAX_MS) as u64
+}
 
 fn panel_fill(alpha: u8) -> egui::Color32 {
     egui::Color32::from_rgba_unmultiplied(SURFACE_RGB.0, SURFACE_RGB.1, SURFACE_RGB.2, alpha)
@@ -32,6 +41,23 @@ fn accent_fill() -> egui::Color32 {
 fn smoothstep(value: f32) -> f32 {
     let t = value.clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+fn compact_path_label(path: &str, max_chars: usize) -> String {
+    if path.chars().count() <= max_chars {
+        return path.to_string();
+    }
+
+    let tail_len = max_chars.saturating_sub(3);
+    let tail = path
+        .chars()
+        .rev()
+        .take(tail_len)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    format!("...{tail}")
 }
 
 fn primary_button(ui: &mut egui::Ui, label: &str, width: f32, height: f32) -> egui::Response {
@@ -69,8 +95,12 @@ fn secondary_button(ui: &mut egui::Ui, label: &str, width: f32, height: f32) -> 
 }
 
 fn small_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    small_button_sized(ui, label, 122.0)
+}
+
+fn small_button_sized(ui: &mut egui::Ui, label: &str, width: f32) -> egui::Response {
     ui.add_sized(
-        [122.0, 30.0],
+        [width, 30.0],
         egui::Button::new(
             egui::RichText::new(label)
                 .size(13.0)
@@ -80,6 +110,27 @@ fn small_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
         .corner_radius(8.0)
         .stroke(egui::Stroke::NONE),
     )
+}
+
+fn sidebar_action_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.add_sized(
+        [138.0, 34.0],
+        egui::Button::new(
+            egui::RichText::new(label)
+                .size(12.5)
+                .color(egui::Color32::from_rgb(224, 228, 236)),
+        )
+        .fill(panel_fill(220))
+        .corner_radius(8.0)
+        .stroke(egui::Stroke::NONE),
+    )
+}
+
+fn centered_fixed_row(ui: &mut egui::Ui, row_width: f32, add_contents: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal(|ui| {
+        ui.add_space(((ui.available_width() - row_width) * 0.5).max(0.0));
+        add_contents(ui);
+    });
 }
 
 fn render_card(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
@@ -410,7 +461,7 @@ impl GameLauncher {
             egui::Color32::from_rgba_unmultiplied(206, 141, 255, (190.0 * alpha) as u8),
         );
 
-        ctx.request_repaint_after(Duration::from_millis(16));
+        ctx.request_repaint_after(Duration::from_millis(SPLASH_REPAINT_MS));
     }
 
     pub fn render_launcher_sidebar_impl(
@@ -446,13 +497,53 @@ impl GameLauncher {
 
             self.render_launch_buttons_compact_impl(ui, ctx);
 
-            ui.add_space(12.0);
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new("In case of crash, \"Force Update\"")
+                    .size(12.0)
+                    .color(egui::Color32::from_rgb(190, 190, 190)),
+            );
+
+            ui.add_space(8.0);
+            centered_fixed_row(ui, 284.0, |ui| {
+                if sidebar_action_button(ui, "Client Folder").clicked() {
+                    self.select_install_folder(ctx);
+                }
+
+                if sidebar_action_button(ui, "Full Map").clicked() {
+                    self.start_full_minimap_download(ctx);
+                }
+            });
+
+            ui.add_space(6.0);
+            centered_fixed_row(ui, 284.0, |ui| {
+                if sidebar_action_button(ui, "Force Update").clicked() {
+                    self.trigger_force_update(ctx);
+                }
+
+                if sidebar_action_button(ui, "Min Launcher").clicked() {
+                    self.minimize_to_tray(ctx);
+                }
+            });
+
+            ui.add_space(6.0);
+            centered_fixed_row(ui, 284.0, |ui| {
+                if sidebar_action_button(ui, "Min/Restore Clients").clicked() {
+                    self.open_minimize_client_selector(ctx);
+                }
+
+                if sidebar_action_button(ui, "Update Launcher").clicked() {
+                    self.start_launcher_update(ctx);
+                }
+            });
+
+            ui.add_space(10.0);
             self.render_external_links_impl(ui);
 
-            ui.add_space(12.0);
+            ui.add_space(10.0);
             self.render_utility_buttons_compact_impl(ui, ctx);
 
-            ui.add_space(12.0);
+            ui.add_space(10.0);
             render_card(ui, "Versions", |ui| {
                 self.render_version_panel_impl(ui);
             });
@@ -531,6 +622,7 @@ impl GameLauncher {
         }
 
         egui::ScrollArea::vertical()
+            .id_salt("dashboard-scroll-v2")
             .auto_shrink([false, false])
             .max_height(max_height)
             .scroll_bar_visibility(
@@ -610,6 +702,7 @@ impl GameLauncher {
         }
 
         egui::ScrollArea::vertical()
+            .id_salt("news-scroll-v2")
             .auto_shrink([false, false])
             .max_height((max_height - 52.0).max(180.0))
             .scroll_bar_visibility(
@@ -685,7 +778,11 @@ impl GameLauncher {
                     egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
                     egui::Color32::WHITE,
                 );
-                ui.ctx().request_repaint_after(Duration::from_millis(80));
+                if self.boosted_preview_is_animated(kind) {
+                    ui.ctx().request_repaint_after(Duration::from_millis(
+                        preview_repaint_delay_ms(frame.delay_ms),
+                    ));
+                }
             } else {
                 let text = if self.boosted_preview_is_loading(kind) {
                     "Loading"
@@ -872,7 +969,12 @@ impl GameLauncher {
                 egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
                 egui::Color32::WHITE,
             );
-            ui.ctx().request_repaint_after(Duration::from_millis(80));
+            if self.offer_preview_is_animated(&preview.url) {
+                ui.ctx()
+                    .request_repaint_after(Duration::from_millis(preview_repaint_delay_ms(
+                        frame.delay_ms,
+                    )));
+            }
         } else {
             let text = if self.offer_preview_is_loading(&preview.url) {
                 "Loading"
@@ -950,7 +1052,7 @@ impl GameLauncher {
     }
 
     fn render_external_links_impl(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_centered(|ui| {
+        centered_fixed_row(ui, 272.0, |ui| {
             if ui
                 .add_sized(
                     [132.0, 32.0],
@@ -1023,52 +1125,20 @@ impl GameLauncher {
         }
     }
 
-    fn render_utility_buttons_compact_impl(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    fn trigger_force_update(&mut self, ctx: &egui::Context) {
         let (has_main, additional_count) = self.game_client.sync_client_state();
-        let has_clients = has_main || additional_count > 0;
+        if has_main || additional_count > 0 {
+            self.status = "Feche todos os clientes antes de usar Force Update".to_string();
+            self.temp_message_time = Some(std::time::Instant::now());
+            self.is_alert_message = true;
+            ctx.request_repaint();
+        } else {
+            self.show_force_update_modal = true;
+        }
+    }
 
-        ui.horizontal_centered(|ui| {
-            if small_button(ui, "Min. launcher").clicked() {
-                self.minimize_to_tray(ctx);
-            }
-
-            let client_button_text = if self.clients_hidden_to_tray {
-                "Restore clients"
-            } else {
-                "Min. clients"
-            };
-
-            if small_button(ui, client_button_text).clicked() {
-                if self.clients_hidden_to_tray {
-                    self.restore_clients_from_tray(ctx);
-                } else {
-                    self.open_minimize_client_selector(ctx);
-                }
-            }
-        });
-
-        ui.add_space(6.0);
-
-        ui.horizontal_centered(|ui| {
-            if small_button(ui, "Force Update").clicked() {
-                if has_clients {
-                    self.status = "Feche todos os clientes antes de usar Force Update".to_string();
-                    self.temp_message_time = Some(std::time::Instant::now());
-                    self.is_alert_message = true;
-                    ctx.request_repaint();
-                } else {
-                    self.show_force_update_modal = true;
-                }
-            }
-
-            if small_button(ui, "Update Launcher").clicked() {
-                self.start_launcher_update(ctx);
-            }
-        });
-
-        ui.add_space(8.0);
-
-        ui.horizontal_centered(|ui| {
+    fn render_utility_buttons_compact_impl(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        centered_fixed_row(ui, 250.0, |ui| {
             let mut disable_auto_start = self.disable_auto_start;
             if ui
                 .checkbox(
@@ -1080,14 +1150,7 @@ impl GameLauncher {
                 .changed()
             {
                 self.disable_auto_start = disable_auto_start;
-                let settings = cache::UserSettings { disable_auto_start };
-                if let Err(error) = cache::CacheManager::new(
-                    self.download_path.clone(),
-                    self.game_path.clone(),
-                    self.state_path.clone(),
-                )
-                .save_user_settings(&settings)
-                {
+                if let Err(error) = self.save_user_settings() {
                     info!("Erro ao salvar configuracoes: {}", error);
                 }
             }
@@ -1095,9 +1158,54 @@ impl GameLauncher {
 
         ui.add_space(6.0);
 
-        ui.horizontal_centered(|ui| {
+        centered_fixed_row(ui, 122.0, |ui| {
             if small_button(ui, "Limpar Cache").clicked() {
                 self.start_cache_clean(ctx);
+            }
+        });
+    }
+
+    fn start_full_minimap_download(&mut self, ctx: &egui::Context) {
+        if self.is_processing {
+            self.status = "Aguarde a operacao atual terminar".to_string();
+            self.temp_message_time = Some(std::time::Instant::now());
+            self.is_alert_message = true;
+            ctx.request_repaint();
+            return;
+        }
+
+        let (tx, rx) = unbounded_channel();
+        self.message_receiver = Some(rx);
+        self.status = "Baixando full map...".to_string();
+        self.is_processing = true;
+        self.progress = 0.0;
+        ctx.request_repaint();
+
+        let download_path = self.download_path.clone();
+        let game_path = self.game_path.clone();
+
+        tokio::spawn(async move {
+            match crate::full_map::download_and_install_full_minimap(
+                download_path,
+                game_path,
+                tx.clone(),
+            )
+            .await
+            {
+                Ok(stats) => {
+                    info!(
+                        "Full map instalado com sucesso: {} arquivos, {} bytes",
+                        stats.files, stats.bytes
+                    );
+                }
+                Err(error) => {
+                    info!("Erro durante download do full map: {}", error);
+                    let _ = tx.send(LauncherMessage::SetStatus(format!(
+                        "Erro ao baixar full map: {}",
+                        error
+                    )));
+                    let _ = tx.send(LauncherMessage::SetProcessing(false));
+                }
             }
         });
     }
@@ -1139,11 +1247,13 @@ impl GameLauncher {
     pub fn render_background_impl(&self, ui: &mut egui::Ui) {
         if let Some(texture) = &self.background_texture {
             let available_rect = ui.max_rect();
-            let time = ui.input(|i| i.time) as f32;
-            let pan = egui::vec2((time * 0.12).sin() * 22.0, (time * 0.10).cos() * 14.0);
+            let time = ui.input(|input| input.time) as f32;
+            let drift_x = (time * 0.12).sin() * 10.0;
+            let drift_y = (time * 0.09).cos() * 8.0;
+            let pulse = ((time * 0.7).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
             let expanded_rect = available_rect
-                .expand2(egui::vec2(46.0, 30.0))
-                .translate(pan);
+                .expand(22.0)
+                .translate(egui::vec2(drift_x, drift_y));
 
             ui.painter().image(
                 texture.id(),
@@ -1152,25 +1262,21 @@ impl GameLauncher {
                 egui::Color32::WHITE,
             );
 
+            let veil_alpha = (24.0 + pulse * 18.0) as u8;
+            ui.painter().rect_filled(
+                available_rect,
+                0.0,
+                egui::Color32::from_rgba_unmultiplied(86, 24, 130, veil_alpha),
+            );
+
             ui.painter().rect_filled(
                 available_rect,
                 0.0,
                 egui::Color32::from_rgba_unmultiplied(3, 7, 14, 214),
             );
 
-            let sweep_y =
-                available_rect.top() + ((time * 18.0) % (available_rect.height() + 180.0)) - 90.0;
-            let sweep_rect = egui::Rect::from_min_size(
-                egui::pos2(available_rect.left(), sweep_y),
-                egui::vec2(available_rect.width(), 72.0),
-            );
-            ui.painter().rect_filled(
-                sweep_rect,
-                0.0,
-                egui::Color32::from_rgba_unmultiplied(234, 182, 76, 18),
-            );
-
-            ui.ctx().request_repaint_after(Duration::from_millis(33));
+            ui.ctx()
+                .request_repaint_after(Duration::from_millis(BACKGROUND_REPAINT_MS));
         }
     }
 
@@ -1211,6 +1317,15 @@ impl GameLauncher {
                                 .color(egui::Color32::from_rgba_unmultiplied(200, 200, 200, 180)),
                         ));
                     }
+
+                    let folder = self.game_path.display().to_string();
+                    let folder_label = compact_path_label(&folder, 54);
+                    ui.add(egui::Label::new(
+                        egui::RichText::new(format!("Folder: {}", folder_label))
+                            .size(12.0)
+                            .color(egui::Color32::from_rgba_unmultiplied(200, 200, 200, 180)),
+                    ))
+                    .on_hover_text(folder);
                 });
             });
         });
@@ -1315,7 +1430,7 @@ impl GameLauncher {
                 }
 
                 if self.is_processing || has_main || additional_count > 0 {
-                    ctx.request_repaint_after(Duration::from_millis(50));
+                    ctx.request_repaint_after(Duration::from_millis(STATUS_REPAINT_MS));
                 }
             }
 
@@ -1543,7 +1658,7 @@ impl GameLauncher {
         if !self.is_processing {
             ui.vertical_centered(|ui| {
                 ui.label(
-                    egui::RichText::new("In case of crashes, click \"Force Update\"")
+                    egui::RichText::new("In case of crash, \"Force Update\"")
                         .size(12.0)
                         .color(egui::Color32::from_rgb(190, 190, 190)),
                 );
@@ -1573,17 +1688,11 @@ impl GameLauncher {
                     self.minimize_to_tray(ctx);
                 }
 
-                let client_button_text = if self.clients_hidden_to_tray {
-                    "Restaurar clientes"
-                } else {
-                    "Minimizar clientes"
-                };
-
                 if ui
                     .add_sized(
-                        [150.0, 30.0],
+                        [180.0, 30.0],
                         egui::Button::new(
-                            egui::RichText::new(client_button_text)
+                            egui::RichText::new("Minimizar/Restaurar clientes")
                                 .size(14.0)
                                 .color(egui::Color32::from_rgb(220, 220, 220)),
                         )
@@ -1598,11 +1707,7 @@ impl GameLauncher {
                     )
                     .clicked()
                 {
-                    if self.clients_hidden_to_tray {
-                        self.restore_clients_from_tray(ctx);
-                    } else {
-                        self.open_minimize_client_selector(ctx);
-                    }
+                    self.open_minimize_client_selector(ctx);
                 }
 
                 if ui
@@ -1657,6 +1762,54 @@ impl GameLauncher {
                     self.start_launcher_update(ctx);
                 }
             });
+
+            ui.add_space(6.0);
+
+            ui.horizontal_centered(|ui| {
+                if ui
+                    .add_sized(
+                        [150.0, 30.0],
+                        egui::Button::new(
+                            egui::RichText::new("Client Folder")
+                                .size(14.0)
+                                .color(egui::Color32::from_rgb(220, 220, 220)),
+                        )
+                        .fill(egui::Color32::from_rgba_unmultiplied(
+                            SURFACE_RGB.0,
+                            SURFACE_RGB.1,
+                            SURFACE_RGB.2,
+                            220,
+                        ))
+                        .corner_radius(12.0)
+                        .stroke(egui::Stroke::NONE),
+                    )
+                    .clicked()
+                {
+                    self.select_install_folder(ctx);
+                }
+
+                if ui
+                    .add_sized(
+                        [130.0, 30.0],
+                        egui::Button::new(
+                            egui::RichText::new("Full Map")
+                                .size(14.0)
+                                .color(egui::Color32::from_rgb(220, 220, 220)),
+                        )
+                        .fill(egui::Color32::from_rgba_unmultiplied(
+                            SURFACE_RGB.0,
+                            SURFACE_RGB.1,
+                            SURFACE_RGB.2,
+                            220,
+                        ))
+                        .corner_radius(12.0)
+                        .stroke(egui::Stroke::NONE),
+                    )
+                    .clicked()
+                {
+                    self.start_full_minimap_download(ctx);
+                }
+            });
         }
 
         if !has_main && additional_count == 0 && !self.is_processing {
@@ -1678,14 +1831,7 @@ impl GameLauncher {
                     .changed()
                 {
                     self.disable_auto_start = disable_auto_start;
-                    let settings = cache::UserSettings { disable_auto_start };
-                    if let Err(error) = cache::CacheManager::new(
-                        self.download_path.clone(),
-                        self.game_path.clone(),
-                        self.state_path.clone(),
-                    )
-                    .save_user_settings(&settings)
-                    {
+                    if let Err(error) = self.save_user_settings() {
                         info!("Erro ao salvar configuracoes: {}", error);
                     }
                 }
