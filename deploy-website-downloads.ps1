@@ -242,10 +242,12 @@ if (Test-Path $bootstrapZipPath) {
 $fullMinimapMetadata = $null
 if (Test-Path $fullMinimapZipPath) {
   $fullMinimapCounts = Get-FullMinimapZipCounts -ZipPath $fullMinimapZipPath
+  $fullMinimapHash = (Get-FileHash $fullMinimapZipPath -Algorithm SHA256).Hash
+  $fullMinimapCacheKey = $fullMinimapHash.Substring(0, 12).ToLowerInvariant()
 
   $fullMinimapMetadata = [ordered]@{
-    zip = "downloads/Penultima-Full-Minimap.zip"
-    sha256 = (Get-FileHash $fullMinimapZipPath -Algorithm SHA256).Hash
+    zip = "downloads/Penultima-Full-Minimap.zip?sha256=$fullMinimapCacheKey"
+    sha256 = $fullMinimapHash
     size = (Get-Item $fullMinimapZipPath).Length
     file_count = $fullMinimapCounts.Total
     minimap_file_count = $fullMinimapCounts.Minimap

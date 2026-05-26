@@ -1,15 +1,18 @@
 use anyhow::{Context, Result, anyhow};
 use futures_util::StreamExt;
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::env;
 use std::fs::{self, File};
-use std::io::{BufWriter, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 use zip::ZipArchive;
 
 use crate::constants::{
-    FULL_MINIMAP_ARCHIVE_URL, FULL_MINIMAP_URL_ENV, HTTP_DOWNLOAD_TIMEOUT, HTTP_REQUEST_TIMEOUT,
+    DOWNLOADS_METADATA_URL, FULL_MINIMAP_ARCHIVE_URL, FULL_MINIMAP_URL_ENV, HTTP_DOWNLOAD_TIMEOUT,
+    HTTP_REQUEST_TIMEOUT, WEBSITE_BASE_URL,
 };
 use crate::message_system::LauncherMessage;
 use crate::tokio::sync::mpsc;
@@ -39,6 +42,25 @@ struct FullMapArchiveEntry {
     size: u64,
 }
 
+#[derive(Debug, Deserialize)]
+struct DownloadsMetadata {
+    full_minimap: Option<FullMinimapRelease>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FullMinimapRelease {
+    zip: String,
+    sha256: Option<String>,
+    size: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FullMinimapDownload {
+    url: String,
+    expected_sha256: Option<String>,
+    expected_size: Option<u64>,
+}
+
 pub async fn download_and_install_full_minimap(
     download_path: PathBuf,
     game_path: PathBuf,
@@ -49,16 +71,48 @@ pub async fn download_and_install_full_minimap(
     fs::create_dir_all(&game_path)
         .with_context(|| format!("Nao foi possivel criar {}", game_path.display()))?;
 
-    let url = env::var(FULL_MINIMAP_URL_ENV)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| FULL_MINIMAP_ARCHIVE_URL.to_string());
+    send_message(
+        &message_sender,
+        LauncherMessage::SetStatus("Verificando pacote do full/custom map...".to_string()),
+    )?;
 
-    download_and_install_full_minimap_from_url(url, download_path, game_path, message_sender).await
+    let metadata_client = reqwest::Client::builder()
+        .connect_timeout(HTTP_REQUEST_TIMEOUT)
+        .timeout(HTTP_REQUEST_TIMEOUT)
+        .build()
+        .context("Falha ao preparar metadata do full map")?;
+    let download_source = resolve_full_minimap_download(&metadata_client).await?;
+
+    download_and_install_full_minimap_from_source(
+        download_source,
+        download_path,
+        game_path,
+        message_sender,
+    )
+    .await
 }
 
 async fn download_and_install_full_minimap_from_url(
     url: String,
+    download_path: PathBuf,
+    game_path: PathBuf,
+    message_sender: mpsc::UnboundedSender<LauncherMessage>,
+) -> Result<FullMinimapInstallStats> {
+    download_and_install_full_minimap_from_source(
+        FullMinimapDownload {
+            url,
+            expected_sha256: None,
+            expected_size: None,
+        },
+        download_path,
+        game_path,
+        message_sender,
+    )
+    .await
+}
+
+async fn download_and_install_full_minimap_from_source(
+    download_source: FullMinimapDownload,
     download_path: PathBuf,
     game_path: PathBuf,
     message_sender: mpsc::UnboundedSender<LauncherMessage>,
@@ -84,12 +138,20 @@ async fn download_and_install_full_minimap_from_url(
 
     download_to_path(
         &http_client,
-        &url,
+        &download_source.url,
         &archive_path,
         &message_sender,
         "Baixando full map e custom map",
     )
     .await?;
+
+    if let Some(expected_size) = download_source.expected_size {
+        verify_download_size(&archive_path, expected_size)?;
+    }
+
+    if let Some(expected_sha256) = download_source.expected_sha256.as_deref() {
+        verify_hash(&archive_path, expected_sha256)?;
+    }
 
     send_message(
         &message_sender,
@@ -251,6 +313,123 @@ pub fn install_full_minimap_from_zip(
         files: extracted_files,
         bytes: extracted_bytes,
     })
+}
+
+async fn resolve_full_minimap_download(
+    http_client: &reqwest::Client,
+) -> Result<FullMinimapDownload> {
+    if let Some(override_url) = env::var(FULL_MINIMAP_URL_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(FullMinimapDownload {
+            url: override_url,
+            expected_sha256: None,
+            expected_size: None,
+        });
+    }
+
+    match fetch_downloads_metadata(http_client).await {
+        Ok(metadata) => {
+            let release = metadata
+                .full_minimap
+                .ok_or_else(|| anyhow!("Metadata remota nao contem full_minimap"))?;
+            Ok(FullMinimapDownload {
+                url: resolve_download_url(&release.zip)?,
+                expected_sha256: release.sha256,
+                expected_size: release.size,
+            })
+        }
+        Err(_) => Ok(FullMinimapDownload {
+            url: FULL_MINIMAP_ARCHIVE_URL.to_string(),
+            expected_sha256: None,
+            expected_size: None,
+        }),
+    }
+}
+
+async fn fetch_downloads_metadata(http_client: &reqwest::Client) -> Result<DownloadsMetadata> {
+    let response = http_client
+        .get(DOWNLOADS_METADATA_URL)
+        .send()
+        .await
+        .with_context(|| format!("Falha ao baixar {}", DOWNLOADS_METADATA_URL))?
+        .error_for_status()
+        .with_context(|| format!("Metadata rejeitada por {}", DOWNLOADS_METADATA_URL))?;
+
+    let metadata_raw = response.text().await.context("Falha ao ler metadata")?;
+    let metadata_raw = metadata_raw.trim_start_matches('\u{feff}');
+    serde_json::from_str::<DownloadsMetadata>(metadata_raw)
+        .context("Metadata de downloads invalida")
+}
+
+fn resolve_download_url(path_or_url: &str) -> Result<String> {
+    let trimmed = path_or_url.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("Metadata do full map contem URL vazia"));
+    }
+
+    if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
+        return Ok(trimmed.to_string());
+    }
+
+    Ok(format!(
+        "{}/{}",
+        WEBSITE_BASE_URL.trim_end_matches('/'),
+        trimmed.trim_start_matches('/')
+    ))
+}
+
+fn verify_download_size(path: &Path, expected_size: u64) -> Result<()> {
+    let actual_size = path
+        .metadata()
+        .with_context(|| format!("Falha ao ler {}", path.display()))?
+        .len();
+    if actual_size != expected_size {
+        return Err(anyhow!(
+            "Tamanho invalido para {} (esperado {}, obtido {})",
+            path.display(),
+            expected_size,
+            actual_size
+        ));
+    }
+
+    Ok(())
+}
+
+fn verify_hash(path: &Path, expected_sha256: &str) -> Result<()> {
+    let actual_sha256 = hash_file(path)?;
+    let expected_sha256 = expected_sha256.trim();
+    if !actual_sha256.eq_ignore_ascii_case(expected_sha256) {
+        return Err(anyhow!(
+            "Hash invalido para {} (esperado {}, obtido {})",
+            path.display(),
+            expected_sha256,
+            actual_sha256
+        ));
+    }
+
+    Ok(())
+}
+
+fn hash_file(path: &Path) -> Result<String> {
+    let mut file = BufReader::new(
+        File::open(path).with_context(|| format!("Falha ao abrir {}", path.display()))?,
+    );
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 1024 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("Falha ao ler {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 async fn download_to_path(
@@ -485,7 +664,7 @@ fn format_bytes(bytes: u64) -> String {
 mod tests {
     use super::{
         FullMapInstallRoot, download_and_install_full_minimap_from_url, full_map_archive_path,
-        install_full_minimap_from_zip,
+        hash_file, install_full_minimap_from_zip, resolve_download_url, verify_hash,
     };
     use crate::tokio::sync::mpsc;
     use std::fs;
@@ -545,6 +724,36 @@ mod tests {
         assert_eq!(full_map_archive_path("minimap/../escape.png"), None);
         assert_eq!(full_map_archive_path("C:/escape.png"), None);
         assert_eq!(full_map_archive_path("assets/not-a-map.txt"), None);
+    }
+
+    #[test]
+    fn resolves_metadata_download_paths() {
+        assert_eq!(
+            resolve_download_url("downloads/Penultima-Full-Minimap.zip?sha256=abc").unwrap(),
+            "https://ultimaotserv.online/downloads/Penultima-Full-Minimap.zip?sha256=abc"
+        );
+        assert_eq!(
+            resolve_download_url("/downloads/Penultima-Full-Minimap.zip").unwrap(),
+            "https://ultimaotserv.online/downloads/Penultima-Full-Minimap.zip"
+        );
+        assert_eq!(
+            resolve_download_url("https://cdn.example/map.zip").unwrap(),
+            "https://cdn.example/map.zip"
+        );
+        assert!(resolve_download_url(" ").is_err());
+    }
+
+    #[test]
+    fn verifies_download_hash_case_insensitively() {
+        let root = temp_dir("full-minimap-hash");
+        let file_path = root.join("map.zip");
+        fs::write(&file_path, b"full-map").unwrap();
+
+        let hash = hash_file(&file_path).unwrap();
+        verify_hash(&file_path, &hash.to_ascii_uppercase()).unwrap();
+        assert!(verify_hash(&file_path, "0000").is_err());
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
