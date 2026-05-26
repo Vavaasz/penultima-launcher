@@ -13,7 +13,7 @@ use std::sync::OnceLock;
 use crate::constants::HTTP_REQUEST_TIMEOUT;
 
 static PREVIEW_CLIENT: OnceLock<Client> = OnceLock::new();
-const MAX_PREVIEW_FRAMES: usize = 8;
+const MAX_PREVIEW_FRAMES: usize = 16;
 const BOOSTED_PREVIEW_MAX_DIMENSION: u32 = 96;
 const MIN_PREVIEW_MAX_DIMENSION: u32 = 16;
 const MAX_PREVIEW_MAX_DIMENSION: u32 = 192;

@@ -1,7 +1,6 @@
 use eframe::egui;
 use log::info;
 use std::time::Duration;
-use tokio::sync::mpsc::unbounded_channel;
 
 use crate::GameLauncher;
 use crate::LauncherTab;
@@ -16,11 +15,11 @@ use crate::message_system::LauncherMessage;
 use crate::website_status::{EventSummary, OfferPreview, OfferSummary};
 
 const TOP_STATUS_CARD_HEIGHT: f32 = 248.0;
-const PREVIEW_REPAINT_MIN_MS: u32 = 180;
-const PREVIEW_REPAINT_MAX_MS: u32 = 320;
+const PREVIEW_REPAINT_MIN_MS: u32 = 70;
+const PREVIEW_REPAINT_MAX_MS: u32 = 160;
 const SPLASH_REPAINT_MS: u64 = 80;
 const STATUS_REPAINT_MS: u64 = 350;
-const BACKGROUND_REPAINT_MS: u64 = 140;
+const BACKGROUND_REPAINT_MS: u64 = 100;
 
 fn preview_repaint_delay_ms(delay_ms: u32) -> u64 {
     delay_ms.clamp(PREVIEW_REPAINT_MIN_MS, PREVIEW_REPAINT_MAX_MS) as u64
@@ -1174,8 +1173,7 @@ impl GameLauncher {
             return;
         }
 
-        let (tx, rx) = unbounded_channel();
-        self.message_receiver = Some(rx);
+        let tx = self.ensure_message_sender();
         self.status = "Baixando full map...".to_string();
         self.is_processing = true;
         self.progress = 0.0;
@@ -1211,8 +1209,7 @@ impl GameLauncher {
     }
 
     fn start_cache_clean(&mut self, ctx: &egui::Context) {
-        let (tx, rx) = unbounded_channel();
-        self.message_receiver = Some(rx);
+        let tx = self.ensure_message_sender();
         self.status = "Limpando cache...".to_string();
         self.is_processing = true;
         self.progress = 0.0;
@@ -1855,8 +1852,7 @@ impl GameLauncher {
                         )
                         .clicked()
                     {
-                        let (tx, rx) = unbounded_channel();
-                        self.message_receiver = Some(rx);
+                        let tx = self.ensure_message_sender();
                         self.status = "Limpando cache...".to_string();
                         self.is_processing = true;
                         self.progress = 0.0;

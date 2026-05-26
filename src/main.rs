@@ -1139,6 +1139,16 @@ impl GameLauncher {
         });
     }
 
+    fn ensure_message_sender(&mut self) -> mpsc::UnboundedSender<LauncherMessage> {
+        if self.message_sender.is_none() {
+            self.setup_update_channel();
+        }
+
+        self.message_sender
+            .clone()
+            .expect("message channel should be initialized")
+    }
+
     fn launch_game(&mut self, ctx: &egui::Context) -> Result<()> {
         info!("Tentando iniciar o jogo...");
         self.status = "Iniciando o cliente...".to_string();
@@ -1237,9 +1247,7 @@ impl GameLauncher {
     }
 
     pub fn start_launcher_update(&mut self, ctx: &egui::Context) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        self.message_receiver = Some(rx);
-        self.message_sender = Some(tx.clone());
+        let tx = self.ensure_message_sender();
         self.status = "Atualizando launcher...".to_string();
         self.is_processing = true;
         self.progress = 0.0;
@@ -1564,90 +1572,87 @@ impl GameLauncher {
             // 1. Drenar canal de mensagens (necessário para detectar comandos)
             let mut should_restart_for_launcher_update = false;
             let mut pending_otclient_launch = None;
+            let mut messages = Vec::new();
             if let Some(receiver) = &mut self.message_receiver {
                 while let Ok(message) = receiver.try_recv() {
-                    match message {
-                        LauncherMessage::LaunchOtClient(path) => {
-                            pending_otclient_launch = Some(path);
-                        }
-                        LauncherMessage::PingResult(ping) => {
-                            self.server_ping = ping;
-                            self.last_ping_check = Some(Instant::now());
-                            self.ping_in_progress = false;
-                        }
-                        LauncherMessage::WebsiteStatusLoaded(status) => {
-                            if let Err(error) =
-                                website_status::save_cached_status(&self.state_path, &status)
-                            {
-                                info!("Falha ao salvar cache do website: {}", error);
-                            }
-                            self.website_status = status;
-                            self.website_status_loading = false;
-                            self.cached_website_previews_queued = false;
-                        }
-                        LauncherMessage::WebsiteStatusError(error) => {
-                            self.website_status_loading = false;
-                            self.website_status.error = Some(error);
-                        }
-                        LauncherMessage::BoostedPreviewLoaded(kind, preview) => {
-                            let _ = preview;
-                            match kind {
-                                BoostedPreviewKind::Creature => {
-                                    self.boosted_creature_preview_loading_url = None;
-                                }
-                                BoostedPreviewKind::Boss => {
-                                    self.boosted_boss_preview_loading_url = None;
-                                }
-                            }
-                        }
-                        LauncherMessage::BoostedPreviewError(kind, url, error) => {
-                            let _ = url;
-                            match kind {
-                                BoostedPreviewKind::Creature => {
-                                    self.boosted_creature_preview_loading_url = None;
-                                    self.boosted_creature_preview_error = Some(error);
-                                }
-                                BoostedPreviewKind::Boss => {
-                                    self.boosted_boss_preview_loading_url = None;
-                                    self.boosted_boss_preview_error = Some(error);
-                                }
-                            }
-                        }
-                        LauncherMessage::OfferPreviewLoaded(preview) => {
-                            self.offer_preview_loading_urls.remove(&preview.url);
-                        }
-                        LauncherMessage::OfferPreviewError(url, error) => {
-                            if self.offer_preview_loading_urls.remove(&url) {
-                                self.offer_preview_errors.insert(url, error);
-                            }
-                        }
-                        LauncherMessage::SetStatus(status) => {
-                            self.status = status;
-                        }
-                        LauncherMessage::SetProcessing(processing) => {
-                            self.is_processing = processing;
-                        }
-                        LauncherMessage::Error(error) => {
-                            self.status = error;
-                            self.is_processing = false;
-                        }
-                        LauncherMessage::VersionUpdated(version) => {
-                            self.current_version = Some(version);
-                        }
-                        LauncherMessage::ClientVersionUpdated(version) => {
-                            self.client_version = Some(version);
-                        }
-                        LauncherMessage::DownloadComplete => {
-                            self.download_completed = true;
-                        }
-                        LauncherMessage::DownloadProgress(progress) => {
-                            self.progress = progress;
-                        }
-                        LauncherMessage::RestartLauncherForUpdate => {
-                            should_restart_for_launcher_update = true;
-                        }
-                        _ => {} // Outras mensagens processadas quando visível
+                    messages.push(message);
+                }
+            }
+
+            for message in messages {
+                match message {
+                    LauncherMessage::LaunchOtClient(path) => {
+                        pending_otclient_launch = Some(path);
                     }
+                    LauncherMessage::PingResult(ping) => {
+                        self.server_ping = ping;
+                        self.last_ping_check = Some(Instant::now());
+                        self.ping_in_progress = false;
+                    }
+                    LauncherMessage::WebsiteStatusLoaded(status) => {
+                        if let Err(error) =
+                            website_status::save_cached_status(&self.state_path, &status)
+                        {
+                            info!("Falha ao salvar cache do website: {}", error);
+                        }
+                        self.website_status = status;
+                        self.website_status_loading = false;
+                        self.cached_website_previews_queued = false;
+                    }
+                    LauncherMessage::WebsiteStatusError(error) => {
+                        self.website_status_loading = false;
+                        self.website_status.error = Some(error);
+                    }
+                    LauncherMessage::BoostedPreviewLoaded(kind, preview) => {
+                        self.apply_boosted_preview(ctx, kind, preview);
+                    }
+                    LauncherMessage::BoostedPreviewError(kind, url, error) => {
+                        let _ = url;
+                        match kind {
+                            BoostedPreviewKind::Creature => {
+                                self.boosted_creature_preview_loading_url = None;
+                                self.boosted_creature_preview_error = Some(error);
+                            }
+                            BoostedPreviewKind::Boss => {
+                                self.boosted_boss_preview_loading_url = None;
+                                self.boosted_boss_preview_error = Some(error);
+                            }
+                        }
+                    }
+                    LauncherMessage::OfferPreviewLoaded(preview) => {
+                        self.apply_offer_preview(ctx, preview);
+                    }
+                    LauncherMessage::OfferPreviewError(url, error) => {
+                        if self.offer_preview_loading_urls.remove(&url) {
+                            self.offer_preview_errors.insert(url, error);
+                        }
+                    }
+                    LauncherMessage::SetStatus(status) => {
+                        self.status = status;
+                    }
+                    LauncherMessage::SetProcessing(processing) => {
+                        self.is_processing = processing;
+                    }
+                    LauncherMessage::Error(error) => {
+                        self.status = error;
+                        self.is_processing = false;
+                    }
+                    LauncherMessage::VersionUpdated(version) => {
+                        self.current_version = Some(version);
+                    }
+                    LauncherMessage::ClientVersionUpdated(version) => {
+                        self.client_version = Some(version);
+                    }
+                    LauncherMessage::DownloadComplete => {
+                        self.download_completed = true;
+                    }
+                    LauncherMessage::DownloadProgress(progress) => {
+                        self.progress = progress;
+                    }
+                    LauncherMessage::RestartLauncherForUpdate => {
+                        should_restart_for_launcher_update = true;
+                    }
+                    _ => {} // Outras mensagens processadas quando visível
                 }
             }
             if let Some(path) = pending_otclient_launch {
@@ -2217,8 +2222,7 @@ impl GameLauncher {
                                         self.show_force_update_modal = false;
 
                                         // Iniciar a atualização forçada
-                                        let (tx, rx) = mpsc::unbounded_channel();
-                                        self.message_receiver = Some(rx);
+                                        let tx = self.ensure_message_sender();
                                         self.status = "Iniciando Force Update...".to_string();
                                         self.is_processing = true;
                                         self.progress = 0.0;

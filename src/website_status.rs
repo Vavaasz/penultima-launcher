@@ -338,7 +338,7 @@ fn parse_offer_previews(html: &str, limit: usize) -> Vec<OfferPreview> {
             continue;
         }
 
-        let url = normalize_url(&decode_html_entities(&src));
+        let url = static_sprite_preview_url(&normalize_url(&decode_html_entities(&src)));
         if previews
             .iter()
             .any(|preview: &OfferPreview| preview.url == url)
@@ -374,6 +374,34 @@ fn parse_offer_previews(html: &str, limit: usize) -> Vec<OfferPreview> {
     previews
 }
 
+fn static_sprite_preview_url(url: &str) -> String {
+    if !url.contains("tools/sprite.php") {
+        return url.to_string();
+    }
+
+    let Some((base, query)) = url.split_once('?') else {
+        return format!("{}?animate=0", url);
+    };
+
+    let mut had_animate = false;
+    let mut params = Vec::new();
+    for param in query.split('&') {
+        let key = param.split_once('=').map(|(key, _)| key).unwrap_or(param);
+        if key.eq_ignore_ascii_case("animate") {
+            had_animate = true;
+            params.push("animate=0".to_string());
+        } else {
+            params.push(param.to_string());
+        }
+    }
+
+    if !had_animate {
+        params.push("animate=0".to_string());
+    }
+
+    format!("{}?{}", base, params.join("&"))
+}
+
 fn capture_attr(attrs: &str, attr_name: &str) -> Option<String> {
     let pattern = format!(
         r#"(?is)\b{}\s*=\s*["']([^"']+)["']"#,
@@ -381,6 +409,29 @@ fn capture_attr(attrs: &str, attr_name: &str) -> Option<String> {
     );
 
     capture_first(attrs, &pattern)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::static_sprite_preview_url;
+
+    #[test]
+    fn offer_sprite_previews_request_static_images() {
+        let url = "https://ultimaotserv.online/tools/sprite.php?type=outfit&id=132&animate=1";
+        assert_eq!(
+            static_sprite_preview_url(url),
+            "https://ultimaotserv.online/tools/sprite.php?type=outfit&id=132&animate=0"
+        );
+    }
+
+    #[test]
+    fn offer_sprite_previews_add_static_flag_when_missing() {
+        let url = "https://ultimaotserv.online/tools/sprite.php?type=item&id=60525";
+        assert_eq!(
+            static_sprite_preview_url(url),
+            "https://ultimaotserv.online/tools/sprite.php?type=item&id=60525&animate=0"
+        );
+    }
 }
 
 fn parse_investor(html: &str) -> Option<InvestorSummary> {
