@@ -27,6 +27,23 @@ const ARCHIVE_DOWNLOAD_PROGRESS_END: f32 = 0.82;
 const ARCHIVE_EXTRACTION_PROGRESS_END: f32 = 0.98;
 const STATUS_REPORT_INTERVAL: Duration = Duration::from_millis(250);
 
+fn client_update_blocker_message(game_path: &Path) -> Option<String> {
+    let running_clients =
+        crate::game_client::GameClient::running_client_processes_for_game_path(game_path);
+    if running_clients.is_empty() {
+        return None;
+    }
+
+    let pids = running_clients
+        .iter()
+        .map(|process| process.pid.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "Feche todos os clientes antes de atualizar (PIDs: {pids})"
+    ))
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct PackageManifest {
     version: String,
@@ -190,6 +207,12 @@ impl UpdateManager {
         )?;
         send_message(&message_sender, LauncherMessage::SetProcessing(true))?;
         send_message(&message_sender, LauncherMessage::DownloadProgress(0.0))?;
+
+        if let Some(message) = client_update_blocker_message(&self.game_path) {
+            send_message(&message_sender, LauncherMessage::SetStatus(message.clone()))?;
+            send_message(&message_sender, LauncherMessage::SetProcessing(false))?;
+            return Err(anyhow!(message));
+        }
 
         let remote = self.fetch_remote_metadata().await?;
         let download_client = reqwest::Client::builder()

@@ -3,16 +3,23 @@ use glob::glob;
 use log::info;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::ptr::null;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use winapi::shared::minwindef::{BOOL, LPARAM, TRUE};
+use winapi::shared::minwindef::{BOOL, DWORD, LPARAM, TRUE};
 use winapi::shared::windef::{HWND, RECT};
+use winapi::um::handleapi::{CloseHandle as CloseRawHandle, INVALID_HANDLE_VALUE};
+use winapi::um::processthreadsapi::OpenProcess;
 use winapi::um::shellapi::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
+use winapi::um::tlhelp32::{
+    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+};
+use winapi::um::winbase::QueryFullProcessImageNameW;
+use winapi::um::winnt::PROCESS_QUERY_LIMITED_INFORMATION;
 use winapi::um::winuser::{
     EnumWindows, GetWindowPlacement, GetWindowTextLengthW, GetWindowTextW,
     GetWindowThreadProcessId, IsIconic, IsWindowVisible, SW_HIDE, SW_RESTORE, SW_SHOW,
@@ -23,8 +30,10 @@ use windows::Win32::Foundation::{CloseHandle, HANDLE, STILL_ACTIVE, WAIT_TIMEOUT
 use windows::Win32::System::Threading::{GetExitCodeProcess, GetProcessId, WaitForSingleObject};
 
 const CLIENT_WINDOW_TITLE_PREFIX: &str = "Tibia - ";
+const PROD_CLIENT_LAUNCHER_EXE: &str = "client_launcher.exe";
 const OTCLIENT_LAUNCHER_EXE: &str = "OTCLauncher.exe";
 const CLIENT_STATE_CACHE_DURATION: Duration = Duration::from_millis(2000);
+const PROCESS_IMAGE_BUFFER_LEN: usize = 32768;
 
 pub struct WindowState {
     pub visible: bool,
@@ -141,6 +150,12 @@ pub struct ClientWindowInfo {
     pub visible: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunningClientProcessInfo {
+    pub pid: u32,
+    pub executable_path: PathBuf,
+}
+
 unsafe extern "system" fn enum_client_windows(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let search = unsafe { &mut *(lparam as *mut ClientWindowSearch) };
     let mut pid = 0u32;
@@ -199,9 +214,22 @@ impl GameClient {
     }
 
     pub fn find_client_path(game_path: &PathBuf) -> Result<PathBuf> {
+        let direct_launcher = game_path.join("bin").join(PROD_CLIENT_LAUNCHER_EXE);
+        if direct_launcher.exists() {
+            return Ok(direct_launcher);
+        }
+
         let direct_client = game_path.join("bin").join("client.exe");
         if direct_client.exists() {
             return Ok(direct_client);
+        }
+
+        let launcher_glob_pattern =
+            format!("{}/*/bin/{}", game_path.display(), PROD_CLIENT_LAUNCHER_EXE);
+        let launcher_entries =
+            glob(&launcher_glob_pattern).context("Falha ao procurar client_launcher.exe")?;
+        if let Some(path) = launcher_entries.filter_map(Result::ok).next() {
+            return Ok(path);
         }
 
         let glob_pattern = format!("{}/*/bin/client.exe", game_path.display());
@@ -212,16 +240,35 @@ impl GameClient {
             .ok_or_else(|| anyhow!("client.exe nao encontrado"))
     }
 
+    pub fn running_client_processes_for_game_path(
+        game_path: &Path,
+    ) -> Vec<RunningClientProcessInfo> {
+        running_client_processes_for_game_path(game_path)
+    }
+
+    pub fn has_client_processes_for_game_path(game_path: &Path) -> bool {
+        !Self::running_client_processes_for_game_path(game_path).is_empty()
+    }
+
     pub fn launch_main_client(&mut self, game_path: &PathBuf) -> Result<()> {
         if self.is_main_client_running() {
             return Err(anyhow!("O cliente principal ja esta em execucao"));
         }
 
-        let client_path = Self::find_client_path(game_path)?;
-        info!("Usando client.exe: {}", client_path.display());
+        let running_clients = Self::running_client_processes_for_game_path(game_path);
+        if !running_clients.is_empty() {
+            let pids = running_clients
+                .iter()
+                .map(|process| process.pid.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(anyhow!("O cliente ja esta em execucao (PIDs: {pids})"));
+        }
 
-        let process =
-            ProcessHandle::spawn(&client_path).context("Falha ao iniciar o client.exe")?;
+        let client_path = Self::find_client_path(game_path)?;
+        info!("Usando executavel do cliente: {}", client_path.display());
+
+        let process = ProcessHandle::spawn(&client_path).context("Falha ao iniciar o cliente")?;
         info!("Processo principal iniciado com PID {}", process.pid);
 
         self.pending_window_restore_pids.insert(process.pid);
@@ -764,6 +811,90 @@ fn unique_client_window_infos(mut infos: Vec<ClientWindowInfo>) -> Vec<ClientWin
     infos
 }
 
+fn running_client_processes_for_game_path(game_path: &Path) -> Vec<RunningClientProcessInfo> {
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Vec::new();
+    }
+
+    let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as DWORD;
+    let mut processes = Vec::new();
+
+    let mut has_entry = unsafe { Process32FirstW(snapshot, &mut entry) != 0 };
+    while has_entry {
+        let executable_name = wide_fixed_to_string(&entry.szExeFile);
+        if is_client_process_executable_name(&executable_name) {
+            if let Some(executable_path) = query_process_image_path(entry.th32ProcessID) {
+                if path_is_within_root(&executable_path, game_path) {
+                    processes.push(RunningClientProcessInfo {
+                        pid: entry.th32ProcessID,
+                        executable_path,
+                    });
+                }
+            }
+        }
+
+        has_entry = unsafe { Process32NextW(snapshot, &mut entry) != 0 };
+    }
+
+    unsafe {
+        CloseRawHandle(snapshot);
+    }
+
+    processes.sort_by_key(|process| process.pid);
+    processes
+}
+
+fn query_process_image_path(pid: u32) -> Option<PathBuf> {
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+
+        let mut buffer = vec![0u16; PROCESS_IMAGE_BUFFER_LEN];
+        let mut len = buffer.len() as DWORD;
+        let success = QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut len);
+        CloseRawHandle(handle);
+
+        if success == 0 || len == 0 {
+            return None;
+        }
+
+        Some(PathBuf::from(OsString::from_wide(&buffer[..len as usize])))
+    }
+}
+
+fn wide_fixed_to_string(value: &[u16]) -> String {
+    let len = value
+        .iter()
+        .position(|character| *character == 0)
+        .unwrap_or(value.len());
+    OsString::from_wide(&value[..len])
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn is_client_process_executable_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("client.exe") || name.eq_ignore_ascii_case(PROD_CLIENT_LAUNCHER_EXE)
+}
+
+fn path_is_within_root(path: &Path, root: &Path) -> bool {
+    let path = comparable_path(path);
+    let root = comparable_path(root);
+    path == root || path.starts_with(&format!("{root}\\"))
+}
+
+fn comparable_path(path: &Path) -> String {
+    fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase()
+}
+
 fn wide_null(value: &OsStr) -> Vec<u16> {
     value.encode_wide().chain(Some(0)).collect()
 }
@@ -805,7 +936,8 @@ pub fn show_window(window_state: &Arc<Mutex<WindowState>>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClientWindowInfo, GameClient, character_name_from_window_title, is_client_window_title,
+        ClientWindowInfo, GameClient, character_name_from_window_title,
+        is_client_process_executable_name, is_client_window_title, path_is_within_root,
     };
     use std::path::PathBuf;
 
@@ -819,6 +951,22 @@ mod tests {
 
         let found = GameClient::find_client_path(&PathBuf::from(&root)).unwrap();
         assert_eq!(found, client);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn prefers_prod_client_launcher_when_available() {
+        let root = std::env::temp_dir().join("penultima-find-client-launcher-test");
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let client = bin.join("client.exe");
+        let launcher = bin.join("client_launcher.exe");
+        std::fs::write(&client, b"client").unwrap();
+        std::fs::write(&launcher, b"launcher").unwrap();
+
+        let found = GameClient::find_client_path(&PathBuf::from(&root)).unwrap();
+        assert_eq!(found, launcher);
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -853,6 +1001,26 @@ mod tests {
         assert!(is_client_window_title("Tibia"));
         assert!(is_client_window_title("Tibia - Waldir"));
         assert!(!is_client_window_title("Other Window"));
+    }
+
+    #[test]
+    fn detects_client_process_executable_names() {
+        assert!(is_client_process_executable_name("client.exe"));
+        assert!(is_client_process_executable_name("CLIENT_LAUNCHER.EXE"));
+        assert!(!is_client_process_executable_name("penultima-launcher.exe"));
+    }
+
+    #[test]
+    fn matches_process_path_inside_game_root() {
+        let root = PathBuf::from(r"C:\Users\Waldir\AppData\Roaming\Penultima Launcher\game");
+        assert!(path_is_within_root(
+            &root.join("bin").join("client.exe"),
+            &root
+        ));
+        assert!(!path_is_within_root(
+            &PathBuf::from(r"D:\Server\Tibia 15.23.bf9553-original-windows\bin\client.exe"),
+            &root
+        ));
     }
 
     #[test]

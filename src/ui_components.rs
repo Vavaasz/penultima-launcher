@@ -1218,7 +1218,9 @@ impl GameLauncher {
 
     fn trigger_force_update(&mut self, ctx: &egui::Context) {
         let (has_main, additional_count) = self.game_client.sync_client_state();
-        if has_main || additional_count > 0 {
+        let has_os_client =
+            crate::game_client::GameClient::has_client_processes_for_game_path(&self.game_path);
+        if has_main || additional_count > 0 || has_os_client {
             self.status = "Feche todos os clientes antes de usar Force Update".to_string();
             self.temp_message_time = Some(std::time::Instant::now());
             self.is_alert_message = true;
@@ -1746,7 +1748,9 @@ impl GameLauncher {
         ui.add_space((available_height - button_height - help_text_height - 1.0).max(0.0));
 
         let (has_main, additional_count) = self.game_client.sync_client_state();
-        let has_clients = has_main || additional_count > 0;
+        let has_clients = has_main
+            || additional_count > 0
+            || crate::game_client::GameClient::has_client_processes_for_game_path(&self.game_path);
         if !self.is_processing {
             ui.vertical_centered(|ui| {
                 ui.label(
