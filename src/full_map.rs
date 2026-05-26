@@ -843,7 +843,7 @@ fn write_atomic_bytes(destination: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 fn is_client_minimap_file(filename: &str) -> bool {
-    is_client_minimap_color_file(filename)
+    is_client_minimap_color_file(filename) || is_client_waypoint_cost_file(filename)
 }
 
 fn is_client_minimap_color_file(filename: &str) -> bool {
@@ -1159,6 +1159,13 @@ mod tests {
                 PathBuf::from("Minimap_Color_0_0_7.png")
             ))
         );
+        assert_eq!(
+            full_map_archive_path("minimap/Minimap_WaypointCost_0_0_7.png"),
+            Some((
+                FullMapInstallRoot::Minimap,
+                PathBuf::from("Minimap_WaypointCost_0_0_7.png")
+            ))
+        );
     }
 
     #[test]
@@ -1198,10 +1205,6 @@ mod tests {
         assert_eq!(full_map_archive_path("../escape.png"), None);
         assert_eq!(full_map_archive_path("minimap/../escape.png"), None);
         assert_eq!(full_map_archive_path("C:/escape.png"), None);
-        assert_eq!(
-            full_map_archive_path("minimap/Minimap_WaypointCost_0_0_7.png"),
-            None
-        );
         assert_eq!(full_map_archive_path("assets/not-a-map.txt"), None);
     }
 
@@ -1262,10 +1265,15 @@ mod tests {
         fs::write(assets_dir.join("satellite-bad.bmp.lzma"), b"bad-satellite").unwrap();
         fs::write(assets_dir.join("subarea-bad.bmp.lzma"), b"bad-subarea").unwrap();
         fs::write(assets_dir.join("custom.txt"), b"keep").unwrap();
+        let waypoint_entry = waypoint_cost_png(1);
         create_zip(
             &archive_path,
             &[
                 ("minimap/Minimap_Color_0_0_7.png", indexed_png_bytes()),
+                (
+                    "minimap/Minimap_WaypointCost_0_0_7.png",
+                    waypoint_entry.as_slice(),
+                ),
                 (
                     "assets/minimap-32-0001-0002-07-hash.bmp.lzma",
                     b"asset-minimap".as_slice(),
@@ -1280,10 +1288,19 @@ mod tests {
 
         let stats = install_full_minimap_from_zip(&archive_path, &game_path, None).unwrap();
 
-        assert_eq!(stats.files, 6);
+        assert_eq!(stats.files, 7);
         assert_eq!(
             fs::read(game_path.join("minimap").join("Minimap_Color_0_0_7.png")).unwrap(),
             indexed_png_bytes()
+        );
+        assert_eq!(
+            fs::read(
+                game_path
+                    .join("minimap")
+                    .join("Minimap_WaypointCost_0_0_7.png")
+            )
+            .unwrap(),
+            waypoint_cost_png(1)
         );
         assert_eq!(
             fs::read(
