@@ -563,9 +563,15 @@ impl GameLauncher {
         if let Some(message_sender) = &self.message_sender {
             let sender = message_sender.clone();
             let preview_cache_dir = self.state_path.join("preview-cache");
+            let display_url = url.clone();
+            let fetch_url = website_status::bounded_animated_sprite_preview_url(
+                &url,
+                OFFER_ANIMATED_PREVIEW_FRAMES,
+            );
             tokio::spawn(async move {
-                match boosted_preview::fetch_animated_preview_cached(
-                    url.clone(),
+                match boosted_preview::fetch_animated_preview_cached_as(
+                    fetch_url,
+                    display_url,
                     OFFER_ANIMATED_PREVIEW_FRAMES,
                     max_dimension,
                     preview_cache_dir,

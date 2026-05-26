@@ -84,6 +84,19 @@ pub async fn fetch_animated_preview_cached(
     fetch_preview_cached(url, max_frames, max_dimension, cache_dir).await
 }
 
+pub async fn fetch_animated_preview_cached_as(
+    fetch_url: String,
+    display_url: String,
+    max_frames: usize,
+    max_dimension: u32,
+    cache_dir: PathBuf,
+) -> Result<BoostedPreviewData> {
+    let mut preview =
+        fetch_animated_preview_cached(fetch_url, max_frames, max_dimension, cache_dir).await?;
+    preview.url = display_url;
+    Ok(preview)
+}
+
 pub async fn fetch_static_preview_cached_as(
     fetch_url: String,
     display_url: String,
