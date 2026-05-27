@@ -21,6 +21,8 @@ const SPLASH_REPAINT_MS: u64 = 16;
 const STATUS_REPAINT_MS: u64 = 33;
 const BACKGROUND_REPAINT_MS: u64 = 33;
 const PLACEHOLDER_MOTION_REPAINT_MS: u64 = 16;
+const CRASH_HELP_TEXT: &str =
+    "In case of crash, \"Force Update\"\nTry to open through \\bin\\client.exe";
 const WIDE_LAYOUT_BREAKPOINT: f32 = 880.0;
 const DASHBOARD_TWO_COLUMN_BREAKPOINT: f32 = 620.0;
 const SIDEBAR_MAX_WIDTH: f32 = 300.0;
@@ -552,7 +554,7 @@ impl GameLauncher {
 
             ui.add_space(8.0);
             ui.label(
-                egui::RichText::new("In case of crash, \"Force Update\"")
+                egui::RichText::new(CRASH_HELP_TEXT)
                     .size(12.0)
                     .color(egui::Color32::from_rgb(190, 190, 190)),
             );
@@ -1744,7 +1746,7 @@ impl GameLauncher {
         button_height: f32,
     ) {
         let available_height = ui.available_height();
-        let help_text_height = 20.0;
+        let help_text_height = 36.0;
         ui.add_space((available_height - button_height - help_text_height - 1.0).max(0.0));
 
         let (has_main, additional_count) = self.game_client.sync_client_state();
@@ -1754,7 +1756,7 @@ impl GameLauncher {
         if !self.is_processing {
             ui.vertical_centered(|ui| {
                 ui.label(
-                    egui::RichText::new("In case of crash, \"Force Update\"")
+                    egui::RichText::new(CRASH_HELP_TEXT)
                         .size(12.0)
                         .color(egui::Color32::from_rgb(190, 190, 190)),
                 );
