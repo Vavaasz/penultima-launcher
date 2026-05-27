@@ -24,6 +24,9 @@ For players:
 Public client feed:
 
 - [Penultima Client](https://github.com/Vavaasz/penultima-client)
+- The launcher resolves the preferred runtime client feed from `https://ultimaotserv.online/downloads/penultima-downloads.json` under `client_feed`. The GitHub raw feed is a fallback only.
+- If the direct `D:\Server\Cliente-15.23-Prod\bin\client.exe` works but the launcher-managed AppData client misses protobuf assets, compare `C:\Users\Waldir\AppData\Roaming\Penultima Launcher\game\assets\catalog-content.json` and `state\package.json` against `https://ultimaotserv.online/downloads/client-feed/package.json` before looking at server code.
+- The full minimap package must not be used as proof that client assets are current; `full_minimap.asset_file_count = 0` means it only updates `game\minimap`.
 
 Local publish helpers:
 

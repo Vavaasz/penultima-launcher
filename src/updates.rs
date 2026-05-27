@@ -10,9 +10,8 @@ use std::path::{Path, PathBuf};
 
 use crate::client_version::ClientVersionManager;
 use crate::constants::{
-    CLIENT_ASSET_MANIFEST_HASH_URL, CLIENT_ASSET_MANIFEST_URL, CLIENT_GITHUB_ARCHIVE_URL,
-    CLIENT_GITHUB_RAW_BASE_URL, CLIENT_PACKAGE_MANIFEST_URL, CLIENT_PACKAGE_VERSION_URL,
-    HTTP_DOWNLOAD_TIMEOUT, HTTP_REQUEST_TIMEOUT,
+    CLIENT_GITHUB_ARCHIVE_URL, CLIENT_GITHUB_RAW_BASE_URL, DOWNLOADS_METADATA_URL,
+    HTTP_DOWNLOAD_TIMEOUT, HTTP_REQUEST_TIMEOUT, WEBSITE_BASE_URL,
 };
 use crate::message_system::LauncherMessage;
 use crate::tokio::sync::mpsc;
@@ -98,7 +97,63 @@ impl PackageFile {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ClientFeedSource {
+    base_url: String,
+    archive_url: String,
+    archive_sha256: Option<String>,
+    archive_size: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DownloadsMetadata {
+    client_feed: Option<ClientFeedRelease>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClientFeedRelease {
+    root: String,
+    bootstrap_zip: Option<String>,
+    bootstrap_sha256: Option<String>,
+    bootstrap_size: Option<u64>,
+}
+
+impl ClientFeedSource {
+    fn github_fallback() -> Self {
+        Self {
+            base_url: CLIENT_GITHUB_RAW_BASE_URL.to_string(),
+            archive_url: CLIENT_GITHUB_ARCHIVE_URL.to_string(),
+            archive_sha256: None,
+            archive_size: None,
+        }
+    }
+
+    fn from_release(release: ClientFeedRelease) -> Result<Self> {
+        let base_url = resolve_download_url(&release.root)?;
+        let archive_url = match release.bootstrap_zip.as_deref() {
+            Some(value) => resolve_download_url(value)?,
+            None => CLIENT_GITHUB_ARCHIVE_URL.to_string(),
+        };
+
+        Ok(Self {
+            base_url,
+            archive_url,
+            archive_sha256: release.bootstrap_sha256,
+            archive_size: release.bootstrap_size,
+        })
+    }
+
+    fn file_url(&self, relative_path: &str) -> String {
+        format!(
+            "{}/{}",
+            self.base_url.trim_end_matches('/'),
+            relative_path.trim_start_matches('/')
+        )
+    }
+}
+
 struct RemoteMetadata {
+    client_feed: ClientFeedSource,
     package_raw: String,
     package_manifest: PackageManifest,
     package_version: String,
@@ -155,11 +210,8 @@ impl UpdateManager {
             return Ok(true);
         }
 
-        let (package_raw, remote_assets_hash) = match tokio::try_join!(
-            fetch_text(CLIENT_PACKAGE_MANIFEST_URL),
-            fetch_text(CLIENT_ASSET_MANIFEST_HASH_URL)
-        ) {
-            Ok(result) => result,
+        let remote = match load_remote_metadata().await {
+            Ok(metadata) => metadata,
             Err(error) => {
                 info!("Falha ao obter manifestos remotos: {}", error);
                 return Ok(false);
@@ -172,8 +224,8 @@ impl UpdateManager {
             read_metadata_file(state_path, game_path, "assets.json.sha256").unwrap_or_default();
 
         Ok(
-            local_package.unwrap_or_default().trim() != package_raw.trim()
-                || local_assets_hash.unwrap_or_default().trim() != remote_assets_hash.trim(),
+            local_package.unwrap_or_default().trim() != remote.package_raw.trim()
+                || local_assets_hash.unwrap_or_default().trim() != remote.assets_hash.trim(),
         )
     }
 
@@ -271,11 +323,21 @@ impl UpdateManager {
         }
 
         if use_archive_install {
-            self.install_from_archive(&download_client, &message_sender, &remote.package_manifest)
-                .await?;
+            self.install_from_archive(
+                &download_client,
+                &message_sender,
+                &remote.client_feed,
+                &remote.package_manifest,
+            )
+            .await?;
         } else {
-            self.download_manifest_files(&download_client, &files_to_update, &message_sender)
-                .await?;
+            self.download_manifest_files(
+                &download_client,
+                &remote.client_feed,
+                &files_to_update,
+                &message_sender,
+            )
+            .await?;
         }
 
         self.persist_metadata(&remote)?;
@@ -297,24 +359,7 @@ impl UpdateManager {
     }
 
     async fn fetch_remote_metadata(&self) -> Result<RemoteMetadata> {
-        let (package_raw, package_version, assets_raw, assets_hash) = tokio::try_join!(
-            fetch_text(CLIENT_PACKAGE_MANIFEST_URL),
-            fetch_text(CLIENT_PACKAGE_VERSION_URL),
-            fetch_text(CLIENT_ASSET_MANIFEST_URL),
-            fetch_text(CLIENT_ASSET_MANIFEST_HASH_URL)
-        )
-        .context("Falha ao baixar metadados remotos do cliente")?;
-
-        let package_manifest: PackageManifest =
-            serde_json::from_str(&package_raw).context("package.json remoto invalido")?;
-
-        Ok(RemoteMetadata {
-            package_raw,
-            package_manifest,
-            package_version: package_version.trim().to_string(),
-            assets_raw,
-            assets_hash: assets_hash.trim().to_string(),
-        })
+        load_remote_metadata().await
     }
 
     fn collect_changed_files(
@@ -469,6 +514,7 @@ impl UpdateManager {
     async fn download_manifest_files(
         &self,
         http_client: &reqwest::Client,
+        client_feed: &ClientFeedSource,
         files_to_update: &[PackageFile],
         message_sender: &mpsc::UnboundedSender<LauncherMessage>,
     ) -> Result<()> {
@@ -491,7 +537,7 @@ impl UpdateManager {
             .unwrap_or_else(Instant::now);
         let mut downloads = stream::iter(files_to_update.iter().cloned().map(|file| async move {
             let file_name = display_file_name(&file.localfile);
-            self.download_manifest_file(http_client, &file)
+            self.download_manifest_file(http_client, client_feed, &file)
                 .await
                 .with_context(|| format!("Falha ao atualizar {}", file.localfile))?;
             Ok::<String, anyhow::Error>(file_name)
@@ -529,6 +575,7 @@ impl UpdateManager {
     async fn download_manifest_file(
         &self,
         http_client: &reqwest::Client,
+        client_feed: &ClientFeedSource,
         file: &PackageFile,
     ) -> Result<()> {
         let target_path = file.target_path(&self.game_path);
@@ -547,7 +594,12 @@ impl UpdateManager {
                 .with_context(|| format!("Falha ao criar diretorio {}", parent.display()))?;
         }
 
-        download_to_path(http_client, &build_raw_url(&file.url), &packed_temp_path).await?;
+        download_to_path(
+            http_client,
+            &client_feed.file_url(&file.url),
+            &packed_temp_path,
+        )
+        .await?;
 
         if file.should_unpack() {
             if let Some(expected_hash) = &file.packedhash {
@@ -595,6 +647,7 @@ impl UpdateManager {
         &self,
         http_client: &reqwest::Client,
         message_sender: &mpsc::UnboundedSender<LauncherMessage>,
+        client_feed: &ClientFeedSource,
         manifest: &PackageManifest,
     ) -> Result<()> {
         fs::create_dir_all(&self.state_path)?;
@@ -609,7 +662,7 @@ impl UpdateManager {
 
         download_to_path_with_progress(
             http_client,
-            CLIENT_GITHUB_ARCHIVE_URL,
+            &client_feed.archive_url,
             &archive_path,
             Some(message_sender),
             "Baixando pacote completo do cliente",
@@ -617,6 +670,13 @@ impl UpdateManager {
             ARCHIVE_DOWNLOAD_PROGRESS_END,
         )
         .await?;
+
+        if let Some(expected_size) = client_feed.archive_size {
+            verify_size(&archive_path, expected_size)?;
+        }
+        if let Some(expected_sha256) = client_feed.archive_sha256.as_deref() {
+            verify_hash(&archive_path, expected_sha256)?;
+        }
 
         send_message(
             message_sender,
@@ -753,6 +813,87 @@ async fn fetch_text(url: &str) -> Result<String, reqwest::Error> {
         .await
 }
 
+async fn load_remote_metadata() -> Result<RemoteMetadata> {
+    let client_feed = match resolve_client_feed_source().await {
+        Ok(source) => source,
+        Err(error) => {
+            info!(
+                "Falha ao resolver feed de cliente do site; usando fallback GitHub: {}",
+                error
+            );
+            ClientFeedSource::github_fallback()
+        }
+    };
+
+    let package_url = client_feed.file_url("package.json");
+    let package_version_url = client_feed.file_url("package.json.version");
+    let assets_url = client_feed.file_url("assets.json");
+    let assets_hash_url = client_feed.file_url("assets.json.sha256");
+    let (package_raw, package_version, assets_raw, assets_hash) = tokio::try_join!(
+        fetch_text(&package_url),
+        fetch_text(&package_version_url),
+        fetch_text(&assets_url),
+        fetch_text(&assets_hash_url)
+    )
+    .context("Falha ao baixar metadados remotos do cliente")?;
+
+    let package_manifest: PackageManifest =
+        serde_json::from_str(&package_raw).context("package.json remoto invalido")?;
+
+    Ok(RemoteMetadata {
+        client_feed,
+        package_raw,
+        package_manifest,
+        package_version: package_version.trim().to_string(),
+        assets_raw,
+        assets_hash: assets_hash.trim().to_string(),
+    })
+}
+
+async fn resolve_client_feed_source() -> Result<ClientFeedSource> {
+    let http_client = reqwest::Client::builder()
+        .timeout(HTTP_REQUEST_TIMEOUT)
+        .build()
+        .context("Falha ao preparar metadata do cliente")?;
+    let metadata = fetch_downloads_metadata(&http_client).await?;
+    let release = metadata
+        .client_feed
+        .ok_or_else(|| anyhow!("Metadata remota nao contem client_feed"))?;
+    ClientFeedSource::from_release(release)
+}
+
+async fn fetch_downloads_metadata(http_client: &reqwest::Client) -> Result<DownloadsMetadata> {
+    let response = http_client
+        .get(DOWNLOADS_METADATA_URL)
+        .send()
+        .await
+        .with_context(|| format!("Falha ao baixar {}", DOWNLOADS_METADATA_URL))?
+        .error_for_status()
+        .with_context(|| format!("Metadata rejeitada por {}", DOWNLOADS_METADATA_URL))?;
+
+    let metadata_raw = response.text().await.context("Falha ao ler metadata")?;
+    let metadata_raw = metadata_raw.trim_start_matches('\u{feff}');
+    serde_json::from_str::<DownloadsMetadata>(metadata_raw)
+        .context("Metadata de downloads invalida")
+}
+
+fn resolve_download_url(path_or_url: &str) -> Result<String> {
+    let trimmed = path_or_url.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("Metadata do cliente contem URL vazia"));
+    }
+
+    if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
+        return Ok(trimmed.to_string());
+    }
+
+    Ok(format!(
+        "{}/{}",
+        WEBSITE_BASE_URL.trim_end_matches('/'),
+        trimmed.trim_start_matches('/')
+    ))
+}
+
 async fn download_to_path(
     http_client: &reqwest::Client,
     url: &str,
@@ -830,14 +971,6 @@ async fn download_to_path_with_progress(
     }
 
     Ok(())
-}
-
-fn build_raw_url(relative_path: &str) -> String {
-    format!(
-        "{}/{}",
-        CLIENT_GITHUB_RAW_BASE_URL.trim_end_matches('/'),
-        relative_path.replace('\\', "/")
-    )
 }
 
 fn temporary_path(target_path: &Path, suffix: &str) -> PathBuf {
@@ -1246,6 +1379,14 @@ impl<W: Write> Write for HashingWriter<W> {
     }
 }
 
+fn verify_size(path: &Path, expected_size: u64) -> Result<()> {
+    let actual_size = path
+        .metadata()
+        .with_context(|| format!("Falha ao ler {}", path.display()))?
+        .len();
+    verify_size_value(path, Some(expected_size), actual_size)
+}
+
 fn verify_size_value(path: &Path, expected_size: Option<u64>, actual_size: u64) -> Result<()> {
     if let Some(expected_size) = expected_size {
         if actual_size != expected_size {
@@ -1317,8 +1458,9 @@ fn hex_nibble(value: u8) -> char {
 #[cfg(test)]
 mod tests {
     use super::{
-        BULK_ARCHIVE_BYTE_THRESHOLD, PackageFile, PackageManifest, UpdateManager,
-        archive_destination_for, archive_relative_path, extract_client_archive,
+        BULK_ARCHIVE_BYTE_THRESHOLD, ClientFeedRelease, ClientFeedSource, PackageFile,
+        PackageManifest, UpdateManager, archive_destination_for, archive_relative_path,
+        extract_client_archive, resolve_download_url,
     };
     use crate::tokio::sync::mpsc;
     use std::collections::HashSet;
@@ -1359,6 +1501,40 @@ mod tests {
         };
 
         assert!(!file.should_unpack());
+    }
+
+    #[test]
+    fn website_client_feed_source_resolves_manifest_and_archive_urls() {
+        let source = ClientFeedSource::from_release(ClientFeedRelease {
+            root: "downloads/client-feed".to_string(),
+            bootstrap_zip: Some("downloads/Penultima-Client-Feed.zip?sha256=abc123".to_string()),
+            bootstrap_sha256: Some("abc123".to_string()),
+            bootstrap_size: Some(42),
+        })
+        .unwrap();
+
+        assert_eq!(
+            source.file_url("package.json"),
+            "https://ultimaotserv.online/downloads/client-feed/package.json"
+        );
+        assert_eq!(
+            source.file_url("assets/catalog-content.json"),
+            "https://ultimaotserv.online/downloads/client-feed/assets/catalog-content.json"
+        );
+        assert_eq!(
+            source.archive_url,
+            "https://ultimaotserv.online/downloads/Penultima-Client-Feed.zip?sha256=abc123"
+        );
+        assert_eq!(source.archive_sha256.as_deref(), Some("abc123"));
+        assert_eq!(source.archive_size, Some(42));
+    }
+
+    #[test]
+    fn resolve_download_url_keeps_absolute_urls() {
+        assert_eq!(
+            resolve_download_url("https://cdn.example.test/client-feed").unwrap(),
+            "https://cdn.example.test/client-feed"
+        );
     }
 
     #[test]
