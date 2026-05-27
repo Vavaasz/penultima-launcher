@@ -1243,7 +1243,38 @@ impl GameLauncher {
             .expect("message channel should be initialized")
     }
 
-    fn launch_game(&mut self, ctx: &egui::Context) -> Result<()> {
+    fn launch_game(&mut self, _ctx: &egui::Context) -> Result<()> {
+        info!("Verificando cliente antes de iniciar pelo botao Play Client 15.23...");
+        self.status = "Verificando arquivos do cliente...".to_string();
+        self.is_processing = true;
+        self.progress = 0.0;
+
+        let sender = self.ensure_message_sender();
+        let update_manager = updates::UpdateManager::new(
+            self.download_path.clone(),
+            self.game_path.clone(),
+            self.state_path.clone(),
+        );
+
+        tokio::spawn(async move {
+            match update_manager.check_for_updates(sender.clone(), true).await {
+                Ok(()) => {
+                    let _ = sender.send(LauncherMessage::LaunchGame);
+                }
+                Err(error) => {
+                    let _ = sender.send(LauncherMessage::Error(format!(
+                        "Erro ao verificar arquivos antes de iniciar: {:#}",
+                        error
+                    )));
+                    let _ = sender.send(LauncherMessage::SetProcessing(false));
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    fn launch_game_now(&mut self, ctx: &egui::Context) -> Result<()> {
         info!("Tentando iniciar o jogo...");
         self.status = "Iniciando o cliente...".to_string();
         self.is_processing = true;
@@ -2098,7 +2129,7 @@ impl GameLauncher {
                 for message in messages {
                     match message {
                         LauncherMessage::LaunchGame => {
-                            if let Err(e) = self.launch_game(ctx) {
+                            if let Err(e) = self.launch_game_now(ctx) {
                                 self.status = format!("Erro ao iniciar o jogo: {}", e);
                             }
                         }

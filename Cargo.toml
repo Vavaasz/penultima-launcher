@@ -1,6 +1,6 @@
 [package]
 name = "penultima-launcher"
-version = "0.1.32"
+version = "0.1.33"
 edition = "2024"
 
 # Configuração para recursos do Windows
