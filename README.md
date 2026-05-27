@@ -10,6 +10,7 @@ What it does:
 - only updates managed client folders: `assets`, `bin`, and `sounds`
 - keeps launcher state in AppData instead of writing manifests into the client root
 - starts the client with production defaults for `ultimaotserv.online`
+- resolves `client.exe` before `client_launcher.exe` for both direct and nested client folders
 - minimizes the launcher itself to the system tray
 
 For players:

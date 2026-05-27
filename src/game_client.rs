@@ -219,6 +219,12 @@ impl GameClient {
             return Ok(direct_client);
         }
 
+        let glob_pattern = format!("{}/*/bin/client.exe", game_path.display());
+        let entries = glob(&glob_pattern).context("Falha ao procurar client.exe")?;
+        if let Some(path) = entries.filter_map(Result::ok).next() {
+            return Ok(path);
+        }
+
         let direct_launcher = game_path.join("bin").join(PROD_CLIENT_LAUNCHER_EXE);
         if direct_launcher.exists() {
             return Ok(direct_launcher);
@@ -228,13 +234,7 @@ impl GameClient {
             format!("{}/*/bin/{}", game_path.display(), PROD_CLIENT_LAUNCHER_EXE);
         let launcher_entries =
             glob(&launcher_glob_pattern).context("Falha ao procurar client_launcher.exe")?;
-        if let Some(path) = launcher_entries.filter_map(Result::ok).next() {
-            return Ok(path);
-        }
-
-        let glob_pattern = format!("{}/*/bin/client.exe", game_path.display());
-        let entries = glob(&glob_pattern).context("Falha ao procurar client.exe")?;
-        entries
+        launcher_entries
             .filter_map(Result::ok)
             .next()
             .ok_or_else(|| anyhow!("client.exe nao encontrado"))
@@ -959,6 +959,22 @@ mod tests {
     fn prefers_direct_client_when_launcher_is_also_available() {
         let root = std::env::temp_dir().join("penultima-find-client-launcher-test");
         let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let client = bin.join("client.exe");
+        let launcher = bin.join("client_launcher.exe");
+        std::fs::write(&client, b"client").unwrap();
+        std::fs::write(&launcher, b"launcher").unwrap();
+
+        let found = GameClient::find_client_path(&PathBuf::from(&root)).unwrap();
+        assert_eq!(found, client);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn prefers_nested_client_when_launcher_is_also_available() {
+        let root = std::env::temp_dir().join("penultima-find-nested-client-launcher-test");
+        let bin = root.join("Penultima").join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let client = bin.join("client.exe");
         let launcher = bin.join("client_launcher.exe");
