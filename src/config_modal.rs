@@ -103,7 +103,8 @@ impl ConfigModal {
             .replace(
                 "\"mouseAnimatedCursor\": true",
                 "\"mouseAnimatedCursor\": false",
-            );
+            )
+            .replace("\"mouseBigCursor\": true", "\"mouseBigCursor\": false");
 
         if updated != content {
             fs::write(&client_options_path, updated)
@@ -524,5 +525,43 @@ impl ConfigModal {
     #[allow(dead_code)]
     pub fn get_config(&self) -> Arc<Mutex<GameConfig>> {
         self.config.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ConfigModal;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn stable_mouse_options_disable_custom_cursor_modes() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("penultima-config-test-{unique}"));
+        let conf = root.join("conf");
+        fs::create_dir_all(&conf).unwrap();
+        let client_options = conf.join("clientoptions.json");
+        fs::write(
+            &client_options,
+            r#"{
+  "mouseSystemCursor": false,
+  "mouseAnimatedCursor": true,
+  "mouseBigCursor": true
+}
+"#,
+        )
+        .unwrap();
+
+        ConfigModal::ensure_stable_mouse_options(&root).unwrap();
+        let updated = fs::read_to_string(&client_options).unwrap();
+
+        assert!(updated.contains(r#""mouseSystemCursor": true"#));
+        assert!(updated.contains(r#""mouseAnimatedCursor": false"#));
+        assert!(updated.contains(r#""mouseBigCursor": false"#));
+
+        let _ = fs::remove_dir_all(root);
     }
 }
