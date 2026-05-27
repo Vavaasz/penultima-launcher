@@ -214,14 +214,14 @@ impl GameClient {
     }
 
     pub fn find_client_path(game_path: &PathBuf) -> Result<PathBuf> {
-        let direct_launcher = game_path.join("bin").join(PROD_CLIENT_LAUNCHER_EXE);
-        if direct_launcher.exists() {
-            return Ok(direct_launcher);
-        }
-
         let direct_client = game_path.join("bin").join("client.exe");
         if direct_client.exists() {
             return Ok(direct_client);
+        }
+
+        let direct_launcher = game_path.join("bin").join(PROD_CLIENT_LAUNCHER_EXE);
+        if direct_launcher.exists() {
+            return Ok(direct_launcher);
         }
 
         let launcher_glob_pattern =
@@ -956,7 +956,7 @@ mod tests {
     }
 
     #[test]
-    fn prefers_prod_client_launcher_when_available() {
+    fn prefers_direct_client_when_launcher_is_also_available() {
         let root = std::env::temp_dir().join("penultima-find-client-launcher-test");
         let bin = root.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
@@ -966,7 +966,7 @@ mod tests {
         std::fs::write(&launcher, b"launcher").unwrap();
 
         let found = GameClient::find_client_path(&PathBuf::from(&root)).unwrap();
-        assert_eq!(found, launcher);
+        assert_eq!(found, client);
 
         let _ = std::fs::remove_dir_all(root);
     }
