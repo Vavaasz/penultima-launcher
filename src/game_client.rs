@@ -6,7 +6,9 @@ use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::ptr::null;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -56,6 +58,40 @@ struct ProcessHandle {
 
 impl ProcessHandle {
     fn spawn(executable_path: &Path) -> Result<Self> {
+        match Self::spawn_with_command(executable_path) {
+            Ok(process) => return Ok(process),
+            Err(error) => {
+                info!(
+                    "Command::spawn falhou para {}; tentando ShellExecuteExW: {:#}",
+                    executable_path.display(),
+                    error
+                );
+            }
+        }
+
+        Self::spawn_with_shell_execute(executable_path)
+    }
+
+    fn spawn_with_command(executable_path: &Path) -> Result<Self> {
+        let workdir = executable_path
+            .parent()
+            .ok_or_else(|| anyhow!("executavel sem diretorio pai"))?;
+        let child = Command::new(executable_path)
+            .current_dir(workdir)
+            .spawn()
+            .context("CreateProcess falhou ao iniciar o executavel")?;
+        let pid = child.id();
+        let handle = HANDLE(child.as_raw_handle().cast());
+        std::mem::forget(child);
+
+        if handle.is_invalid() {
+            return Err(anyhow!("CreateProcess nao retornou handle do processo"));
+        }
+
+        Ok(Self { pid, handle })
+    }
+
+    fn spawn_with_shell_execute(executable_path: &Path) -> Result<Self> {
         let file_wide = wide_null(executable_path.as_os_str());
         let workdir = executable_path
             .parent()
@@ -89,6 +125,22 @@ impl ProcessHandle {
         }
 
         Ok(Self { pid, handle })
+    }
+
+    fn exited_within(&self, timeout: Duration) -> Option<u32> {
+        unsafe {
+            if WaitForSingleObject(
+                self.handle,
+                timeout.as_millis().min(u32::MAX as u128) as u32,
+            ) == WAIT_TIMEOUT
+            {
+                return None;
+            }
+
+            let mut exit_code = 0u32;
+            GetExitCodeProcess(self.handle, &mut exit_code).ok()?;
+            Some(exit_code)
+        }
     }
 
     fn is_running(&self) -> bool {
@@ -269,6 +321,12 @@ impl GameClient {
         info!("Usando executavel do cliente: {}", client_path.display());
 
         let process = ProcessHandle::spawn(&client_path).context("Falha ao iniciar o cliente")?;
+        if let Some(exit_code) = process.exited_within(Duration::from_millis(1200)) {
+            return Err(anyhow!(
+                "O cliente fechou logo apos iniciar (codigo {}). Use Force Update e tente novamente.",
+                exit_code
+            ));
+        }
         info!("Processo principal iniciado com PID {}", process.pid);
 
         self.pending_window_restore_pids.insert(process.pid);
@@ -283,6 +341,12 @@ impl GameClient {
         let client_path = Self::find_client_path(game_path)?;
         let process =
             ProcessHandle::spawn(&client_path).context("Falha ao iniciar client adicional")?;
+        if let Some(exit_code) = process.exited_within(Duration::from_millis(1200)) {
+            return Err(anyhow!(
+                "O cliente adicional fechou logo apos iniciar (codigo {}). Use Force Update e tente novamente.",
+                exit_code
+            ));
+        }
 
         info!("Cliente adicional iniciado com PID {}", process.pid);
         self.pending_window_restore_pids.insert(process.pid);
@@ -311,6 +375,12 @@ impl GameClient {
         }
 
         let process = ProcessHandle::spawn(launcher_path).context("Falha ao iniciar OTClient")?;
+        if let Some(exit_code) = process.exited_within(Duration::from_millis(1200)) {
+            return Err(anyhow!(
+                "OTClient fechou logo apos iniciar (codigo {}).",
+                exit_code
+            ));
+        }
         info!("OTClient launcher iniciado com PID {}", process.pid);
         self.pending_window_restore_pids.insert(process.pid);
         self.active_clients.push(process);

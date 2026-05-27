@@ -11,6 +11,7 @@ What it does:
 - keeps launcher state in AppData instead of writing manifests into the client root
 - starts the client with production defaults for `ultimaotserv.online`
 - resolves `client.exe` before `client_launcher.exe` for both direct and nested client folders
+- checks launcher/client updates at startup before play, and normalizes risky mouse cursor options before launching the client
 - minimizes the launcher itself to the system tray
 
 For players:

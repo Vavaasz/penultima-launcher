@@ -87,6 +87,36 @@ impl ConfigModal {
     }
 
     // Cria uma nova instância do ConfigModal
+    pub fn ensure_stable_mouse_options(game_path: &Path) -> Result<()> {
+        let client_options_path = game_path.join("conf").join("clientoptions.json");
+        if !client_options_path.exists() {
+            return Ok(());
+        }
+
+        let content =
+            fs::read_to_string(&client_options_path).context("Falha ao ler clientoptions.json")?;
+        let updated = content
+            .replace(
+                "\"mouseSystemCursor\": false",
+                "\"mouseSystemCursor\": true",
+            )
+            .replace(
+                "\"mouseAnimatedCursor\": true",
+                "\"mouseAnimatedCursor\": false",
+            );
+
+        if updated != content {
+            fs::write(&client_options_path, updated)
+                .context("Falha ao atualizar opcoes de mouse do clientoptions.json")?;
+            info!(
+                "Opcoes de mouse normalizadas em {}",
+                client_options_path.display()
+            );
+        }
+
+        Ok(())
+    }
+
     pub fn new(game_path: PathBuf) -> Self {
         let config_path = Self::ensure_default_config(&game_path)
             .unwrap_or_else(|_| Self::resolve_config_path(&game_path));

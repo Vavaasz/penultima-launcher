@@ -1248,6 +1248,7 @@ impl GameLauncher {
         self.status = "Iniciando o cliente...".to_string();
         self.is_processing = true;
         ConfigModal::ensure_default_config(&self.game_path)?;
+        ConfigModal::ensure_stable_mouse_options(&self.game_path)?;
 
         // Usar o GameClient para iniciar o jogo principal
         match self.game_client.launch_main_client(&self.game_path) {
@@ -1274,6 +1275,7 @@ impl GameLauncher {
 
     fn launch_client(&mut self) -> Result<()> {
         ConfigModal::ensure_default_config(&self.game_path)?;
+        ConfigModal::ensure_stable_mouse_options(&self.game_path)?;
 
         // Usar o GameClient para iniciar um cliente adicional
         match self.game_client.launch_additional_client(&self.game_path) {
@@ -1845,160 +1847,148 @@ impl GameLauncher {
             let message_sender = self.message_sender.clone();
             let disable_auto_start = self.disable_auto_start; // Capturar o estado do checkbox
 
-            if false {
-                tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_secs(6)).await;
-                    info!("Verificando atualizacoes do cliente em segundo plano...");
-                    if false {
-                        // Atualizar o status para "Verificando atualizações"
-                        if let Some(sender) = message_sender.clone() {
-                            let _ = sender.send(LauncherMessage::SetStatus(
-                                "Verificando atualizações...".to_string(),
-                            ));
-                            let _ = sender.send(LauncherMessage::SetProcessing(true));
-                        }
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(6)).await;
+                info!("Verificando atualizacoes do cliente em segundo plano...");
+                {
+                    // Atualizar o status para "Verificando atualizações"
+                    if let Some(sender) = message_sender.clone() {
+                        let _ = sender.send(LauncherMessage::SetStatus(
+                            "Verificando atualizações...".to_string(),
+                        ));
+                        let _ = sender.send(LauncherMessage::SetProcessing(true));
+                    }
 
-                        info!("Verificando atualizações iniciais...");
-                        if let Some(sender) = message_sender.clone() {
-                            let launcher_update_manager =
-                                launcher_update::LauncherUpdateManager::new(
-                                    download_path.clone(),
-                                    state_path.clone(),
-                                );
+                    info!("Verificando atualizações iniciais...");
+                    if let Some(sender) = message_sender.clone() {
+                        let launcher_update_manager = launcher_update::LauncherUpdateManager::new(
+                            download_path.clone(),
+                            state_path.clone(),
+                        );
 
-                            match launcher_update_manager
-                                .update_launcher_if_available(sender.clone())
-                                .await
-                            {
-                                Ok(true) => {
-                                    info!(
-                                        "Update do launcher encontrado; reiniciando para aplicar"
-                                    );
-                                    return;
-                                }
-                                Ok(false) => {
-                                    info!("Launcher ja esta atualizado");
-                                }
-                                Err(error) => {
-                                    info!(
-                                        "Falha ao verificar update automatico do launcher: {:#}",
-                                        error
-                                    );
-                                }
+                        match launcher_update_manager
+                            .update_launcher_if_available(sender.clone())
+                            .await
+                        {
+                            Ok(true) => {
+                                info!("Update do launcher encontrado; reiniciando para aplicar");
+                                return;
                             }
-                        }
-
-                        if let Some(sender) = message_sender.clone() {
-                            let _ = sender.send(LauncherMessage::SetStatus(
-                                "Verificando atualizacoes...".to_string(),
-                            ));
-                            let _ = sender.send(LauncherMessage::DownloadProgress(0.0));
-                            let _ = sender.send(LauncherMessage::SetProcessing(true));
+                            Ok(false) => {
+                                info!("Launcher ja esta atualizado");
+                            }
+                            Err(error) => {
+                                info!(
+                                    "Falha ao verificar update automatico do launcher: {:#}",
+                                    error
+                                );
+                            }
                         }
                     }
 
-                    match updates::UpdateManager::check_initial_updates(&game_path, &state_path)
-                        .await
-                    {
-                        Ok(needs_update) => {
-                            if needs_update {
-                                info!("Atualização encontrada! Mostrando launcher...");
-                                // Mostrar janela do launcher pois precisa atualizar
+                    if let Some(sender) = message_sender.clone() {
+                        let _ = sender.send(LauncherMessage::SetStatus(
+                            "Verificando atualizacoes...".to_string(),
+                        ));
+                        let _ = sender.send(LauncherMessage::DownloadProgress(0.0));
+                        let _ = sender.send(LauncherMessage::SetProcessing(true));
+                    }
+                }
+
+                match updates::UpdateManager::check_initial_updates(&game_path, &state_path).await {
+                    Ok(needs_update) => {
+                        if needs_update {
+                            info!("Atualização encontrada! Mostrando launcher...");
+                            // Mostrar janela do launcher pois precisa atualizar
+                            if let Some(sender) = message_sender.clone() {
+                                sender
+                                    .send(LauncherMessage::SetStatus(
+                                        "Nova versão disponível. Iniciando download...".to_string(),
+                                    ))
+                                    .ok();
+
+                                sender
+                                    .send(LauncherMessage::UpdateAvailable(
+                                        "Nova versão disponível".to_string(),
+                                    ))
+                                    .ok();
+
+                                sender.send(LauncherMessage::SetProcessing(true)).ok();
+
+                                // Iniciar o download automaticamente
+                                let game_path = game_path.clone();
+                                let state_path = state_path.clone();
+                                let message_tx = sender.clone();
+
+                                tokio::spawn(async move {
+                                    let update_manager = updates::UpdateManager::new(
+                                        download_path,
+                                        game_path,
+                                        state_path,
+                                    );
+                                    if let Err(e) = update_manager
+                                        .check_for_updates(message_tx.clone(), disable_auto_start)
+                                        .await
+                                    {
+                                        let _ = message_tx.send(LauncherMessage::Error(format!(
+                                            "Erro ao iniciar download automático: {:#}",
+                                            e
+                                        )));
+                                        info!("Erro ao iniciar download automático: {}", e);
+                                    }
+                                });
+                            }
+                        } else {
+                            info!("Nenhuma atualização encontrada!");
+
+                            // Só inicia automaticamente se disable_auto_start for false
+                            if !disable_auto_start {
+                                info!("Iniciando o cliente automaticamente...");
+                                // Atualizar o status para "Iniciando o Cliente"
                                 if let Some(sender) = message_sender.clone() {
                                     sender
                                         .send(LauncherMessage::SetStatus(
-                                            "Nova versão disponível. Iniciando download..."
-                                                .to_string(),
+                                            "Iniciando o Cliente...".to_string(),
                                         ))
                                         .ok();
+                                }
 
-                                    sender
-                                        .send(LauncherMessage::UpdateAvailable(
-                                            "Nova versão disponível".to_string(),
-                                        ))
-                                        .ok();
+                                // Pequeno delay para que o usuário veja a mensagem
+                                tokio::time::sleep(Duration::from_millis(800)).await;
 
-                                    sender.send(LauncherMessage::SetProcessing(true)).ok();
-
-                                    // Iniciar o download automaticamente
-                                    let game_path = game_path.clone();
-                                    let state_path = state_path.clone();
-                                    let message_tx = sender.clone();
-
-                                    tokio::spawn(async move {
-                                        let update_manager = updates::UpdateManager::new(
-                                            download_path,
-                                            game_path,
-                                            state_path,
-                                        );
-                                        if let Err(e) = update_manager
-                                            .check_for_updates(
-                                                message_tx.clone(),
-                                                disable_auto_start,
-                                            )
-                                            .await
-                                        {
-                                            let _ =
-                                                message_tx.send(LauncherMessage::Error(format!(
-                                                    "Erro ao iniciar download automático: {:#}",
-                                                    e
-                                                )));
-                                            info!("Erro ao iniciar download automático: {}", e);
-                                        }
-                                    });
+                                // Iniciar o jogo
+                                if let Some(sender) = message_sender {
+                                    sender.send(LauncherMessage::LaunchGame).ok();
                                 }
                             } else {
-                                info!("Nenhuma atualização encontrada!");
-
-                                // Só inicia automaticamente se disable_auto_start for false
-                                if !disable_auto_start {
-                                    info!("Iniciando o cliente automaticamente...");
-                                    // Atualizar o status para "Iniciando o Cliente"
-                                    if let Some(sender) = message_sender.clone() {
-                                        sender
-                                            .send(LauncherMessage::SetStatus(
-                                                "Iniciando o Cliente...".to_string(),
-                                            ))
-                                            .ok();
-                                    }
-
-                                    // Pequeno delay para que o usuário veja a mensagem
-                                    tokio::time::sleep(Duration::from_millis(800)).await;
-
-                                    // Iniciar o jogo
-                                    if let Some(sender) = message_sender {
-                                        sender.send(LauncherMessage::LaunchGame).ok();
-                                    }
-                                } else {
-                                    info!("Início automático desativado pelo usuário");
-                                    if let Some(sender) = message_sender {
-                                        sender
-                                            .send(LauncherMessage::SetStatus(
-                                                "Pronto para jogar".to_string(),
-                                            ))
-                                            .ok();
-                                        sender.send(LauncherMessage::SetProcessing(false)).ok();
-                                    }
+                                info!("Início automático desativado pelo usuário");
+                                if let Some(sender) = message_sender {
+                                    sender
+                                        .send(LauncherMessage::SetStatus(
+                                            "Pronto para jogar".to_string(),
+                                        ))
+                                        .ok();
+                                    sender.send(LauncherMessage::SetProcessing(false)).ok();
                                 }
-                            }
-                        }
-                        Err(e) => {
-                            info!("Erro ao verificar atualizações: {}", e);
-                            // Em caso de erro, mostrar o launcher para o usuário
-                            game_client::show_window(&window_state);
-                            needs_repaint.store(true, Ordering::SeqCst);
-                            if let Some(sender) = message_sender {
-                                sender
-                                    .send(LauncherMessage::Error(format!(
-                                        "Erro ao verificar atualizações: {}",
-                                        e
-                                    )))
-                                    .ok();
                             }
                         }
                     }
-                });
-            }
+                    Err(e) => {
+                        info!("Erro ao verificar atualizações: {}", e);
+                        // Em caso de erro, mostrar o launcher para o usuário
+                        game_client::show_window(&window_state);
+                        needs_repaint.store(true, Ordering::SeqCst);
+                        if let Some(sender) = message_sender {
+                            sender
+                                .send(LauncherMessage::Error(format!(
+                                    "Erro ao verificar atualizações: {}",
+                                    e
+                                )))
+                                .ok();
+                        }
+                    }
+                }
+            });
             self.status = "Pronto para jogar".to_string();
             self.is_processing = false;
         }
