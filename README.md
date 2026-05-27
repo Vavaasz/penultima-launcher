@@ -27,6 +27,8 @@ Public client feed:
 - The launcher resolves the preferred runtime client feed from `https://ultimaotserv.online/downloads/penultima-downloads.json` under `client_feed`. The GitHub raw feed is a fallback only.
 - If the direct `D:\Server\Cliente-15.23-Prod\bin\client.exe` works but the launcher-managed AppData client misses protobuf assets, compare `C:\Users\Waldir\AppData\Roaming\Penultima Launcher\game\assets\catalog-content.json` and `state\package.json` against `https://ultimaotserv.online/downloads/client-feed/package.json` before looking at server code.
 - The visible `Play Client 15.23` path must run the client updater before launching; otherwise a fast click after launcher startup can start a stale AppData client before the delayed background update repairs it.
+- For the current 15.23 feed, the working `client.exe` SHA-256 is `234F2174144F8A4A726A6E3C15BEA0961E6A8E60EE6536B678606B390C52CCC9`. It differs from the broken launcher-fed binary by one byte at offset `0x30D254`: the working byte is `0x75`, not `0xEB`. Do not treat a generic BattlEye `75 -> EB` signature as validated for this deployed binary without comparing against the direct client that is known to launch, accept mouse input, and render protobuf assets correctly.
+- Website boosted boss/creature images that use `lookTypeEx` must render through the local protobuf sprite endpoint, for example `getItemImageUrl(..., animate: true)` or `tools/sprite.php?type=item&id=<id>&animate=1`; the legacy `item_images_url/<id>.gif` path bypasses the 15.23 protobuf assets.
 - The full minimap package must not be used as proof that client assets are current; `full_minimap.asset_file_count = 0` means it only updates `game\minimap`.
 
 Local publish helpers:
