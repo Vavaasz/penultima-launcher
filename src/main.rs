@@ -9,7 +9,7 @@ use log::info;
 use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
 use std::fs::{self};
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -183,8 +183,7 @@ impl Default for GameLauncher {
         info!("Diretorio do cliente selecionado: {:?}", game_path);
 
         // Criar GameClient com número máximo específico de clientes
-        let mut game_client = GameClient::default();
-        game_client.set_window_state_path(state_path.join("client-window-state.json"));
+        let game_client = GameClient::default();
 
         // Carregar configurações do usuário
         let disable_auto_start = user_settings.disable_auto_start;
@@ -282,7 +281,7 @@ fn normalized_path_key(path: &PathBuf) -> String {
 }
 
 fn normalize_game_root_path(path: PathBuf) -> PathBuf {
-    let normalized = fs::canonicalize(&path).unwrap_or(path);
+    let normalized = without_windows_extended_prefix(&fs::canonicalize(&path).unwrap_or(path));
     let Some(name) = normalized.file_name().and_then(|value| value.to_str()) else {
         return normalized;
     };
@@ -300,10 +299,21 @@ fn normalize_game_root_path(path: PathBuf) -> PathBuf {
         || parent.join("assets").exists()
         || parent.join("conf").exists()
     {
-        return parent.to_path_buf();
+        return without_windows_extended_prefix(&parent.to_path_buf());
     }
 
     normalized
+}
+
+fn without_windows_extended_prefix(path: &Path) -> PathBuf {
+    let value = path.to_string_lossy();
+    if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = value.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    path.to_path_buf()
 }
 
 impl GameLauncher {
@@ -346,14 +356,6 @@ impl GameLauncher {
     fn select_install_folder(&mut self, ctx: &egui::Context) {
         if self.is_processing {
             self.status = "Aguarde a operacao atual terminar antes de trocar a pasta".to_string();
-            self.temp_message_time = Some(Instant::now());
-            self.is_alert_message = true;
-            ctx.request_repaint();
-            return;
-        }
-
-        if !self.game_client.client_window_infos().is_empty() {
-            self.status = "Feche ou restaure os clientes antes de trocar a pasta".to_string();
             self.temp_message_time = Some(Instant::now());
             self.is_alert_message = true;
             ctx.request_repaint();
@@ -1314,50 +1316,13 @@ impl GameLauncher {
     }
 
     fn launch_game(&mut self, ctx: &egui::Context) -> Result<()> {
-        if !self.uses_managed_game_path() {
-            info!(
-                "Cliente local selecionado; iniciando sem aplicar feed remoto: {:?}",
-                self.game_path
-            );
-            return self.launch_game_now(ctx);
-        }
-
-        info!("Verificando cliente antes de iniciar pelo botao Play Client 15.23...");
-        self.status = "Verificando arquivos do cliente...".to_string();
-        self.is_processing = true;
-        self.progress = 0.0;
-
-        let sender = self.ensure_message_sender();
-        let update_manager = updates::UpdateManager::new(
-            self.download_path.clone(),
-            self.game_path.clone(),
-            self.state_path.clone(),
-        );
-
-        tokio::spawn(async move {
-            match update_manager.check_for_updates(sender.clone(), true).await {
-                Ok(()) => {
-                    let _ = sender.send(LauncherMessage::LaunchGame);
-                }
-                Err(error) => {
-                    let _ = sender.send(LauncherMessage::Error(format!(
-                        "Erro ao verificar arquivos antes de iniciar: {:#}",
-                        error
-                    )));
-                    let _ = sender.send(LauncherMessage::SetProcessing(false));
-                }
-            }
-        });
-
-        Ok(())
+        self.launch_game_now(ctx)
     }
 
     fn launch_game_now(&mut self, ctx: &egui::Context) -> Result<()> {
         info!("Tentando iniciar o jogo...");
         self.status = "Iniciando o cliente...".to_string();
         self.is_processing = true;
-        ConfigModal::ensure_default_config(&self.game_path)?;
-        ConfigModal::ensure_stable_mouse_options(&self.game_path)?;
 
         // Usar o GameClient para iniciar o jogo principal
         match self.game_client.launch_main_client(&self.game_path) {
@@ -1383,9 +1348,6 @@ impl GameLauncher {
     }
 
     fn launch_client(&mut self) -> Result<()> {
-        ConfigModal::ensure_default_config(&self.game_path)?;
-        ConfigModal::ensure_stable_mouse_options(&self.game_path)?;
-
         // Usar o GameClient para iniciar um cliente adicional
         match self.game_client.launch_additional_client(&self.game_path) {
             Ok(_) => {
@@ -2726,12 +2688,20 @@ async fn run_headless_tasks(args: &Args, app_dirs: &AppDirs) -> Result<()> {
     }
 
     if args.launch_client_once {
-        ConfigModal::ensure_default_config(&game_path)?;
-        ConfigModal::ensure_stable_mouse_options(&game_path)?;
         let mut game_client = GameClient::new();
-        game_client.set_window_state_path(app_dirs.state_path.join("client-window-state.json"));
         game_client.launch_main_client(&game_path)?;
         println!("Launched client from {}", game_path.display());
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+
+    if args.launch_client_count > 0 {
+        let mut game_client = GameClient::new();
+        game_client.launch_main_client(&game_path)?;
+        println!("Launched client 1 from {}", game_path.display());
+        for index in 2..=args.launch_client_count {
+            game_client.launch_additional_client(&game_path)?;
+            println!("Launched client {index} from {}", game_path.display());
+        }
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
 
@@ -2771,7 +2741,12 @@ async fn main() -> Result<()> {
     }
 
     // Inicializar o gerenciador de instância
-    let mut instance_manager = InstanceManager::new(INSTANCE_NAME);
+    let instance_name = args
+        .instance_suffix
+        .as_ref()
+        .map(|suffix| format!("{INSTANCE_NAME}-{suffix}"))
+        .unwrap_or_else(|| INSTANCE_NAME.to_string());
+    let mut instance_manager = InstanceManager::new(&instance_name);
 
     // Verificar se o launcher já está rodando
     if !instance_manager.ensure_single_instance()? {
@@ -2863,9 +2838,6 @@ async fn main() -> Result<()> {
 
             let mut launcher = GameLauncher::default();
             launcher.game_client = GameClient::new();
-            launcher
-                .game_client
-                .set_window_state_path(launcher.state_path.join("client-window-state.json"));
             launcher.window_state = window_state;
             launcher.initialized = false;
             launcher.auto_hide = args.auto_hide;
@@ -2907,8 +2879,9 @@ impl eframe::App for GameLauncher {
 
 #[cfg(test)]
 mod launcher_path_tests {
-    use super::normalize_game_root_path;
+    use super::{normalize_game_root_path, without_windows_extended_prefix};
     use std::fs;
+    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -2924,8 +2897,17 @@ mod launcher_path_tests {
 
         let normalized = normalize_game_root_path(bin);
 
-        assert_eq!(fs::canonicalize(&root).unwrap(), normalized);
+        assert_eq!(
+            without_windows_extended_prefix(&fs::canonicalize(&root).unwrap()),
+            normalized
+        );
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn normalizes_selected_extended_path_prefix() {
+        let normalized = normalize_game_root_path(PathBuf::from(r"\\?\D:\Server\Client"));
+        assert_eq!(normalized, PathBuf::from(r"D:\Server\Client"));
     }
 }

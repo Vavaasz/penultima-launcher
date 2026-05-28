@@ -27,6 +27,14 @@ pub struct Args {
     /// Launches the selected 15.23 client once and exits.
     #[clap(long)]
     pub launch_client_once: bool,
+
+    /// Launches N selected 15.23 clients once and exits.
+    #[clap(long, default_value_t = 0)]
+    pub launch_client_count: u8,
+
+    /// Uses a separate single-instance lock for local smoke tests.
+    #[clap(long)]
+    pub instance_suffix: Option<String>,
 }
 
 impl Args {
@@ -35,6 +43,7 @@ impl Args {
             || self.full_map_once
             || self.prepare_otclient_once
             || self.launch_client_once
+            || self.launch_client_count > 0
     }
 }
 

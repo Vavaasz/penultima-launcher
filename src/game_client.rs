@@ -1,5 +1,4 @@
 use anyhow::{Context, Result, anyhow};
-use glob::glob;
 use log::info;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -9,14 +8,12 @@ use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::ptr::null;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use winapi::shared::minwindef::{BOOL, DWORD, LPARAM, TRUE};
 use winapi::shared::windef::{HWND, RECT};
 use winapi::um::handleapi::{CloseHandle as CloseRawHandle, INVALID_HANDLE_VALUE};
 use winapi::um::processthreadsapi::OpenProcess;
-use winapi::um::shellapi::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
 use winapi::um::tlhelp32::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
@@ -29,10 +26,9 @@ use winapi::um::winuser::{
     WINDOWPLACEMENT,
 };
 use windows::Win32::Foundation::{CloseHandle, HANDLE, STILL_ACTIVE, WAIT_TIMEOUT};
-use windows::Win32::System::Threading::{GetExitCodeProcess, GetProcessId, WaitForSingleObject};
+use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
 
 const CLIENT_WINDOW_TITLE_PREFIX: &str = "Tibia - ";
-const PROD_CLIENT_LAUNCHER_EXE: &str = "client_launcher.exe";
 const OTCLIENT_LAUNCHER_EXE: &str = "OTCLauncher.exe";
 const CLIENT_STATE_CACHE_DURATION: Duration = Duration::from_millis(2000);
 const PROCESS_IMAGE_BUFFER_LEN: usize = 32768;
@@ -58,18 +54,7 @@ struct ProcessHandle {
 
 impl ProcessHandle {
     fn spawn(executable_path: &Path) -> Result<Self> {
-        match Self::spawn_with_command(executable_path) {
-            Ok(process) => return Ok(process),
-            Err(error) => {
-                info!(
-                    "Command::spawn falhou para {}; tentando ShellExecuteExW: {:#}",
-                    executable_path.display(),
-                    error
-                );
-            }
-        }
-
-        Self::spawn_with_shell_execute(executable_path)
+        Self::spawn_with_command(&without_windows_extended_prefix(executable_path))
     }
 
     fn spawn_with_command(executable_path: &Path) -> Result<Self> {
@@ -86,42 +71,6 @@ impl ProcessHandle {
 
         if handle.is_invalid() {
             return Err(anyhow!("CreateProcess nao retornou handle do processo"));
-        }
-
-        Ok(Self { pid, handle })
-    }
-
-    fn spawn_with_shell_execute(executable_path: &Path) -> Result<Self> {
-        let file_wide = wide_null(executable_path.as_os_str());
-        let workdir = executable_path
-            .parent()
-            .ok_or_else(|| anyhow!("executavel sem diretorio pai"))?;
-        let workdir_wide = wide_null(workdir.as_os_str());
-        let mut exec_info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
-        exec_info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
-        exec_info.fMask = SEE_MASK_NOCLOSEPROCESS;
-        exec_info.lpVerb = null();
-        exec_info.lpFile = file_wide.as_ptr();
-        exec_info.lpDirectory = workdir_wide.as_ptr();
-        exec_info.nShow = winapi::um::winuser::SW_SHOWNORMAL;
-
-        unsafe {
-            if ShellExecuteExW(&mut exec_info) == 0 {
-                return Err(anyhow!("ShellExecuteExW falhou ao iniciar o executavel"));
-            }
-        }
-
-        let handle = HANDLE(exec_info.hProcess.cast());
-        if handle.is_invalid() {
-            return Err(anyhow!("ShellExecuteExW nao retornou handle do processo"));
-        }
-
-        let pid = unsafe { GetProcessId(handle) };
-        if pid == 0 {
-            unsafe {
-                let _ = CloseHandle(handle);
-            }
-            return Err(anyhow!("Nao foi possivel obter o PID do processo"));
         }
 
         Ok(Self { pid, handle })
@@ -266,30 +215,16 @@ impl GameClient {
     }
 
     pub fn find_client_path(game_path: &PathBuf) -> Result<PathBuf> {
-        let direct_client = game_path.join("bin").join("client.exe");
+        let direct_client =
+            without_windows_extended_prefix(&game_path.join("bin").join("client.exe"));
         if direct_client.exists() {
             return Ok(direct_client);
         }
 
-        let glob_pattern = format!("{}/*/bin/client.exe", game_path.display());
-        let entries = glob(&glob_pattern).context("Falha ao procurar client.exe")?;
-        if let Some(path) = entries.filter_map(Result::ok).next() {
-            return Ok(path);
-        }
-
-        let direct_launcher = game_path.join("bin").join(PROD_CLIENT_LAUNCHER_EXE);
-        if direct_launcher.exists() {
-            return Ok(direct_launcher);
-        }
-
-        let launcher_glob_pattern =
-            format!("{}/*/bin/{}", game_path.display(), PROD_CLIENT_LAUNCHER_EXE);
-        let launcher_entries =
-            glob(&launcher_glob_pattern).context("Falha ao procurar client_launcher.exe")?;
-        launcher_entries
-            .filter_map(Result::ok)
-            .next()
-            .ok_or_else(|| anyhow!("client.exe nao encontrado"))
+        Err(anyhow!(
+            "client.exe nao encontrado em {}",
+            direct_client.display()
+        ))
     }
 
     pub fn running_client_processes_for_game_path(
@@ -307,16 +242,6 @@ impl GameClient {
             return Err(anyhow!("O cliente principal ja esta em execucao"));
         }
 
-        let running_clients = Self::running_client_processes_for_game_path(game_path);
-        if !running_clients.is_empty() {
-            let pids = running_clients
-                .iter()
-                .map(|process| process.pid.to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(anyhow!("O cliente ja esta em execucao (PIDs: {pids})"));
-        }
-
         let client_path = Self::find_client_path(game_path)?;
         info!("Usando executavel do cliente: {}", client_path.display());
 
@@ -329,7 +254,6 @@ impl GameClient {
         }
         info!("Processo principal iniciado com PID {}", process.pid);
 
-        self.pending_window_restore_pids.insert(process.pid);
         self.game_process = Some(process);
         self.invalidate_client_state_cache();
         Ok(())
@@ -349,7 +273,6 @@ impl GameClient {
         }
 
         info!("Cliente adicional iniciado com PID {}", process.pid);
-        self.pending_window_restore_pids.insert(process.pid);
         self.active_clients.push(process);
         self.invalidate_client_state_cache();
         Ok(())
@@ -947,7 +870,7 @@ fn wide_fixed_to_string(value: &[u16]) -> String {
 }
 
 fn is_client_process_executable_name(name: &str) -> bool {
-    name.eq_ignore_ascii_case("client.exe") || name.eq_ignore_ascii_case(PROD_CLIENT_LAUNCHER_EXE)
+    name.eq_ignore_ascii_case("client.exe")
 }
 
 fn path_is_within_root(path: &Path, root: &Path) -> bool {
@@ -965,8 +888,15 @@ fn comparable_path(path: &Path) -> String {
         .to_ascii_lowercase()
 }
 
-fn wide_null(value: &OsStr) -> Vec<u16> {
-    value.encode_wide().chain(Some(0)).collect()
+fn without_windows_extended_prefix(path: &Path) -> PathBuf {
+    let value = path.to_string_lossy();
+    if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = value.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    path.to_path_buf()
 }
 
 pub fn show_window(window_state: &Arc<Mutex<WindowState>>) {
@@ -1042,7 +972,7 @@ mod tests {
     }
 
     #[test]
-    fn prefers_nested_client_when_launcher_is_also_available() {
+    fn does_not_fall_back_to_nested_client_or_launcher() {
         let root = std::env::temp_dir().join("penultima-find-nested-client-launcher-test");
         let bin = root.join("Penultima").join("bin");
         std::fs::create_dir_all(&bin).unwrap();
@@ -1051,8 +981,8 @@ mod tests {
         std::fs::write(&client, b"client").unwrap();
         std::fs::write(&launcher, b"launcher").unwrap();
 
-        let found = GameClient::find_client_path(&PathBuf::from(&root)).unwrap();
-        assert_eq!(found, client);
+        let error = GameClient::find_client_path(&PathBuf::from(&root)).unwrap_err();
+        assert!(error.to_string().contains(r"bin\client.exe"));
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1092,8 +1022,24 @@ mod tests {
     #[test]
     fn detects_client_process_executable_names() {
         assert!(is_client_process_executable_name("client.exe"));
-        assert!(is_client_process_executable_name("CLIENT_LAUNCHER.EXE"));
+        assert!(!is_client_process_executable_name("CLIENT_LAUNCHER.EXE"));
         assert!(!is_client_process_executable_name("penultima-launcher.exe"));
+    }
+
+    #[test]
+    fn strips_windows_extended_prefix_for_spawn_paths() {
+        assert_eq!(
+            super::without_windows_extended_prefix(
+                PathBuf::from(r"\\?\D:\Server\Client\bin\client.exe").as_path()
+            ),
+            PathBuf::from(r"D:\Server\Client\bin\client.exe")
+        );
+        assert_eq!(
+            super::without_windows_extended_prefix(
+                PathBuf::from(r"\\?\UNC\server\share\Client\bin\client.exe").as_path()
+            ),
+            PathBuf::from(r"\\server\share\Client\bin\client.exe")
+        );
     }
 
     #[test]

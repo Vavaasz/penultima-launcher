@@ -10,8 +10,8 @@ What it does:
 - only updates managed client folders: `assets`, `bin`, and `sounds`
 - keeps launcher state in AppData instead of writing manifests into the client root
 - starts the client with production defaults for `ultimaotserv.online`
-- resolves `client.exe` before `client_launcher.exe` for both direct and nested client folders
-- checks launcher/client updates at startup before play, and normalizes risky mouse cursor options before launching the client
+- launches only the selected folder's `bin\client.exe`; `client_launcher.exe` and nested client folders are not launch fallbacks
+- keeps update, Force Update, full-map, and config repair work outside the Play button path
 - minimizes the launcher itself to the system tray
 
 For players:
@@ -26,19 +26,27 @@ Public client feed:
 - [Penultima Client](https://github.com/Vavaasz/penultima-client)
 - The launcher resolves the preferred runtime client feed from `https://ultimaotserv.online/downloads/penultima-downloads.json` under `client_feed`. The GitHub raw feed is a fallback only.
 - If the direct `D:\Server\Cliente-15.23-Prod\bin\client.exe` works but the launcher-managed AppData client misses protobuf assets, compare `C:\Users\Waldir\AppData\Roaming\Penultima Launcher\game\assets\catalog-content.json` and `state\package.json` against `https://ultimaotserv.online/downloads/client-feed/package.json` before looking at server code.
-- The visible `Play Client 15.23` path must run the client updater before launching; otherwise a fast click after launcher startup can start a stale AppData client before the delayed background update repairs it.
+- The visible `Play Client 15.23` path must only launch the selected folder's `bin\client.exe`. Client feed repair belongs to `Force Update`, startup/background checks, or explicit headless maintenance, not to the Play click itself.
 - For the current 15.23 feed, the expected patched `client.exe` SHA-256 is `52449E00EBAE67F433333AC86708E85721C0A762CD2EBF2C6271D2AB8C9DBC98`. The client-editor PR #16 patch changes bytes at offset `0x30D254` from `75 0F E8 35 FF FF FF 48` to `EB 0F E8 35 FF FF FF 48`, but that binary patch does not suppress the visible BattlEye popup when the game server still sends CipSoft's client-check packet.
 - Tibia 15.23 renders `ProtocolGame::sendClientCheck()` (`0x63`, `uint32 1`, `byte 1`) as the `clientcheck_disconnected` BattlEye dialog. If `login.php` already returns `anticheatprotection=false` and the popup still appears after character login, verify that the server login flow is not calling `player->sendClientCheck()` before changing launcher or asset code.
 - The 15.23 client binary contains an `enableClientCheck` config key. Keep `[STARTUP] enableClientCheck=false` in shipped `conf\config.ini` as a client-side guard, but do not rely on it as the only fix; the server should not send the client-check packet for this deployment.
 - Website boosted boss/creature images that use `lookTypeEx` must render through the local protobuf sprite endpoint, for example `getItemImageUrl(..., animate: true)` or `tools/sprite.php?type=item&id=<id>&animate=1`; the legacy `item_images_url/<id>.gif` path bypasses the 15.23 protobuf assets.
 - The full minimap package must not be used as proof that client assets are current; `full_minimap.asset_file_count = 0` means it only updates `game\minimap`.
+- Both first and additional 15.23 launches must execute exactly `<selected client folder>\bin\client.exe`. Do not fall back to `client_launcher.exe`, nested `*/bin/client.exe`, or generated secondary-client roots.
+- A visible `Play Client 15.23` click must not refuse only because another `client.exe` is already running from that same folder. Existing clients are left alone; the click starts another direct `bin\client.exe` process.
+- Before spawning `client.exe`, strip Windows extended-length prefixes such as `\\?\D:\...` back to normal `D:\...` paths. The command line and working directory should match a regular double-click from `bin\client.exe` as closely as possible.
+- Do not save or apply client window placement after a `Play Client 15.23` launch. A stale maximized `state\client-window-state.json` can create a large `Default IME` child window over the map area, causing black flashes and mouse clicks to hit the overlay instead of the game.
+- To build a clean local client ZIP from the real protobuf closure, use `python tools\clean_client_package.py --source "D:\Server\Tibia 15.23.bf9553-original-windows" --output "D:\Server\_publish\Tibia-15.23-local-clean.zip" --report "D:\Server\_publish\Tibia-15.23-local-clean.report.json"`. The tool keeps every `file` from `assets\catalog-content.json`, decodes `map-*.dat` protobuf map asset records for `resource_files.file_name`, decodes sound-bank protobuf strings from `sounds\catalog-sound.json`, fails before ZIP generation on missing references, and re-audits the generated ZIP for `extraFiles=0` and `missingFiles=0`.
 - A selected client folder outside the launcher's managed AppData `game` folder is treated as a local/direct client. The launcher must skip website launcher updates, client feed checks, and Force Update for that folder, then launch its `bin\client.exe` as-is. This keeps `D:\Server\Tibia 15.23.bf9553-original-windows` usable for local login/debug without replacing it from the public feed.
+- `Client Folder` must remain available while clients are open. Switching the selected folder only changes launcher state and does not mutate the old client folder; destructive/update actions such as `Force Update` still require no clients running for the selected folder.
 - If the saved or selected folder is the client's `bin` directory, normalize it back to the client root before checking managed/local mode. A saved `...\game\bin` path makes the launcher search for `...\game\bin\bin\client.exe` and incorrectly disables Force Update as if the managed AppData client were an external local folder.
 - If `penultima-downloads.json` provides `client_feed.bootstrap_sha256` but `client_feed.bootstrap_zip` has no query string, the launcher appends `?sha256=<hash>` before downloading the bootstrap ZIP. Without that cache-buster, a stale cached `Penultima-Client-Feed.zip` can pass through the old URL and fail with an expected/obtained size mismatch.
 - Write `downloads/penultima-downloads.json` as UTF-8 without BOM. Windows PowerShell `Set-Content -Encoding utf8` can publish a BOM-prefixed JSON file that strict launcher metadata parsing may reject.
 - `state\settings.json` must be read with a UTF-8 BOM tolerated. PowerShell can write a BOM, and without trimming it the launcher silently falls back to the managed AppData `game` folder instead of the selected local client.
 - Full-map verification must avoid large stack buffers. The launcher hashes the minimap ZIP with a small streaming buffer because a 1 MiB stack buffer overflows the launcher main thread during `--full-map-once`.
 - Local smoke-test flags are available for background maintenance: `--update-client-once`, `--full-map-once`, `--prepare-otclient-once`, and `--launch-client-once`.
+- For a local multi-client smoke test without opening the launcher UI, write `state\settings.json` with the selected local `game_path`, run `penultima-launcher.exe --launch-client-count 3`, and inspect only the PIDs whose executable path is exactly inside that selected client's `bin` folder.
+- To open a visible local launcher beside the production launcher, use an isolated `APPDATA` and pass `--instance-suffix <name>` so the single-instance lock does not signal the production launcher.
 - The OTC button downloads `http://otcrp.com/downloads/penultima/launcher.zip`, extracts `OTCLauncher.exe` under `C:\Users\Waldir\AppData\Roaming\Penultima Launcher\otclient\penultima`, and that stub updates/runs the real OTC install from `C:\Users\Waldir\AppData\Local\otclient-premium\app`.
 
 Local publish helpers:
