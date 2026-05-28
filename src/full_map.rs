@@ -441,7 +441,7 @@ fn hash_file(path: &Path) -> Result<String> {
         File::open(path).with_context(|| format!("Falha ao abrir {}", path.display()))?,
     );
     let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 1024 * 1024];
+    let mut buffer = [0u8; 64 * 1024];
     loop {
         let read = file
             .read(&mut buffer)

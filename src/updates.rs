@@ -130,15 +130,17 @@ impl ClientFeedSource {
 
     fn from_release(release: ClientFeedRelease) -> Result<Self> {
         let base_url = resolve_download_url(&release.root)?;
+        let archive_sha256 = release.bootstrap_sha256;
         let archive_url = match release.bootstrap_zip.as_deref() {
             Some(value) => resolve_download_url(value)?,
             None => CLIENT_GITHUB_ARCHIVE_URL.to_string(),
         };
+        let archive_url = append_sha256_cache_buster(archive_url, archive_sha256.as_deref());
 
         Ok(Self {
             base_url,
             archive_url,
-            archive_sha256: release.bootstrap_sha256,
+            archive_sha256,
             archive_size: release.bootstrap_size,
         })
     }
@@ -894,6 +896,21 @@ fn resolve_download_url(path_or_url: &str) -> Result<String> {
     ))
 }
 
+fn append_sha256_cache_buster(archive_url: String, archive_sha256: Option<&str>) -> String {
+    let Some(sha256) = archive_sha256
+        .map(str::trim)
+        .filter(|sha256| !sha256.is_empty())
+    else {
+        return archive_url;
+    };
+
+    if archive_url.contains('?') {
+        return archive_url;
+    }
+
+    format!("{archive_url}?sha256={sha256}")
+}
+
 async fn download_to_path(
     http_client: &reqwest::Client,
     url: &str,
@@ -1527,6 +1544,22 @@ mod tests {
         );
         assert_eq!(source.archive_sha256.as_deref(), Some("abc123"));
         assert_eq!(source.archive_size, Some(42));
+    }
+
+    #[test]
+    fn website_client_feed_source_adds_sha256_cache_buster_to_plain_archive_url() {
+        let source = ClientFeedSource::from_release(ClientFeedRelease {
+            root: "downloads/client-feed".to_string(),
+            bootstrap_zip: Some("downloads/Penultima-Client-Feed.zip".to_string()),
+            bootstrap_sha256: Some("abc123".to_string()),
+            bootstrap_size: Some(42),
+        })
+        .unwrap();
+
+        assert_eq!(
+            source.archive_url,
+            "https://ultimaotserv.online/downloads/Penultima-Client-Feed.zip?sha256=abc123"
+        );
     }
 
     #[test]

@@ -11,6 +11,31 @@ pub struct Args {
     /// Ativa o auto-hide do launcher quando um cliente é iniciado
     #[clap(long, short = 'a')]
     pub auto_hide: bool,
+
+    /// Runs the client updater once and exits.
+    #[clap(long)]
+    pub update_client_once: bool,
+
+    /// Downloads and installs the full map once and exits.
+    #[clap(long)]
+    pub full_map_once: bool,
+
+    /// Downloads/prepares the OTClient partner launcher once and exits.
+    #[clap(long)]
+    pub prepare_otclient_once: bool,
+
+    /// Launches the selected 15.23 client once and exits.
+    #[clap(long)]
+    pub launch_client_once: bool,
+}
+
+impl Args {
+    pub fn has_headless_task(&self) -> bool {
+        self.update_client_once
+            || self.full_map_once
+            || self.prepare_otclient_once
+            || self.launch_client_once
+    }
 }
 
 /// Função para alocar e mostrar um novo console

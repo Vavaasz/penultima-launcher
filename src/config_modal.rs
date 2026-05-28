@@ -75,6 +75,7 @@ impl ConfigModal {
     pub fn ensure_default_config(game_path: &PathBuf) -> Result<PathBuf> {
         let config_path = Self::resolve_config_path(game_path);
         if config_path.exists() {
+            Self::ensure_client_check_disabled(&config_path)?;
             return Ok(config_path);
         }
 
@@ -83,7 +84,67 @@ impl ConfigModal {
         }
 
         fs::write(&config_path, DEFAULT_CONFIG_INI).context("Falha ao gravar config.ini padrão")?;
+        Self::ensure_client_check_disabled(&config_path)?;
         Ok(config_path)
+    }
+
+    fn ensure_client_check_disabled(config_path: &Path) -> Result<()> {
+        let content = fs::read_to_string(config_path)
+            .context("Falha ao ler config.ini para ajustar client check")?;
+        let mut output = String::new();
+        let mut current_section = String::new();
+        let mut startup_section_seen = false;
+        let mut startup_key_seen = false;
+        let mut changed = false;
+        let mut inserted_before_next_section = false;
+
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                if startup_section_seen && !startup_key_seen && !inserted_before_next_section {
+                    output.push_str("enableClientCheck=false\n");
+                    startup_key_seen = true;
+                    inserted_before_next_section = true;
+                    changed = true;
+                }
+
+                current_section = trimmed[1..trimmed.len() - 1].to_string();
+                if current_section.eq_ignore_ascii_case("STARTUP") {
+                    startup_section_seen = true;
+                }
+            }
+
+            if current_section.eq_ignore_ascii_case("STARTUP") {
+                if let Some((key, _)) = trimmed.split_once('=') {
+                    if key.trim().eq_ignore_ascii_case("enableClientCheck") {
+                        startup_key_seen = true;
+                        if trimmed != "enableClientCheck=false" {
+                            output.push_str("enableClientCheck=false\n");
+                            changed = true;
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            output.push_str(line);
+            output.push('\n');
+        }
+
+        if !startup_section_seen {
+            output.push_str("\n[STARTUP]\nenableClientCheck=false\n");
+            changed = true;
+        } else if !startup_key_seen {
+            output.push_str("enableClientCheck=false\n");
+            changed = true;
+        }
+
+        if changed {
+            fs::write(config_path, output)
+                .context("Falha ao gravar config.ini com client check desativado")?;
+        }
+
+        Ok(())
     }
 
     // Cria uma nova instância do ConfigModal
@@ -561,6 +622,31 @@ mod tests {
         assert!(updated.contains(r#""mouseSystemCursor": true"#));
         assert!(updated.contains(r#""mouseAnimatedCursor": false"#));
         assert!(updated.contains(r#""mouseBigCursor": false"#));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn default_config_disables_client_check_for_existing_configs() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("penultima-clientcheck-test-{unique}"));
+        let conf = root.join("conf");
+        fs::create_dir_all(&conf).unwrap();
+        let config_ini = conf.join("config.ini");
+        fs::write(
+            &config_ini,
+            "[URLS]\nloginWebService=https://ultimaotserv.online/login.php\n\n[GRAPHICS]\nrenderLoopType=basic\n",
+        )
+        .unwrap();
+
+        ConfigModal::ensure_default_config(&root).unwrap();
+        let updated = fs::read_to_string(&config_ini).unwrap();
+
+        assert!(updated.contains("[STARTUP]\n"));
+        assert!(updated.contains("enableClientCheck=false\n"));
 
         let _ = fs::remove_dir_all(root);
     }

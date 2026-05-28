@@ -57,7 +57,7 @@ impl CacheManager {
         let settings_path = self.state_path.join("settings.json");
         if settings_path.exists() {
             let json = fs::read_to_string(&settings_path)?;
-            let settings = serde_json::from_str(&json)?;
+            let settings = serde_json::from_str(json.trim_start_matches('\u{feff}'))?;
             Ok(settings)
         } else {
             Ok(UserSettings::default())

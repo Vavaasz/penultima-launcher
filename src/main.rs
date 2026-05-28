@@ -80,6 +80,7 @@ struct GameLauncher {
     progress: f32,
     download_path: PathBuf,
     game_path: PathBuf,
+    managed_game_path: PathBuf,
     otclient_path: PathBuf,
     state_path: PathBuf,
     current_version: Option<String>,
@@ -153,10 +154,25 @@ impl Default for GameLauncher {
             state_path.clone(),
         );
         let user_settings = cache_manager.load_user_settings().unwrap_or_default();
-        let game_path = user_settings
+        let raw_game_path = user_settings
             .game_path
             .clone()
             .unwrap_or(default_game_path.clone());
+        let game_path = normalize_game_root_path(raw_game_path.clone());
+        if normalized_path_key(&raw_game_path) != normalized_path_key(&game_path) {
+            let settings = cache::UserSettings {
+                disable_auto_start: user_settings.disable_auto_start,
+                game_path: Some(game_path.clone()),
+            };
+            if let Err(error) = cache_manager.save_user_settings(&settings) {
+                info!(
+                    "Nao foi possivel normalizar caminho salvo do cliente {} para {}: {}",
+                    raw_game_path.display(),
+                    game_path.display(),
+                    error
+                );
+            }
+        }
         if let Err(error) = fs::create_dir_all(&game_path) {
             info!(
                 "Nao foi possivel criar diretorio do cliente selecionado {}: {}",
@@ -178,6 +194,7 @@ impl Default for GameLauncher {
             progress: 0.0,
             download_path: download_path.clone(),
             game_path: game_path.clone(),
+            managed_game_path: default_game_path.clone(),
             otclient_path: app_dirs.otclient_path.clone(),
             state_path: state_path.clone(),
             current_version: None,
@@ -254,6 +271,41 @@ impl Default for GameLauncher {
     }
 }
 
+fn normalized_path_key(path: &PathBuf) -> String {
+    let normalized_root = normalize_game_root_path(path.clone());
+    let normalized = fs::canonicalize(&normalized_root).unwrap_or(normalized_root);
+    normalized
+        .to_string_lossy()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_ascii_lowercase()
+}
+
+fn normalize_game_root_path(path: PathBuf) -> PathBuf {
+    let normalized = fs::canonicalize(&path).unwrap_or(path);
+    let Some(name) = normalized.file_name().and_then(|value| value.to_str()) else {
+        return normalized;
+    };
+
+    if !name.eq_ignore_ascii_case("bin") {
+        return normalized;
+    }
+
+    let Some(parent) = normalized.parent() else {
+        return normalized;
+    };
+
+    if normalized.join("client.exe").exists()
+        || parent.join("bin").exists()
+        || parent.join("assets").exists()
+        || parent.join("conf").exists()
+    {
+        return parent.to_path_buf();
+    }
+
+    normalized
+}
+
 impl GameLauncher {
     /// Carrega a versão do client.exe
     fn load_client_version(&mut self) {
@@ -285,6 +337,10 @@ impl GameLauncher {
             self.state_path.clone(),
         )
         .save_user_settings(&settings)
+    }
+
+    fn uses_managed_game_path(&self) -> bool {
+        normalized_path_key(&self.game_path) == normalized_path_key(&self.managed_game_path)
     }
 
     fn select_install_folder(&mut self, ctx: &egui::Context) {
@@ -326,6 +382,7 @@ impl GameLauncher {
     }
 
     fn apply_install_folder(&mut self, folder: PathBuf) -> Result<()> {
+        let folder = normalize_game_root_path(folder);
         fs::create_dir_all(&folder)
             .with_context(|| format!("Nao foi possivel criar {}", folder.display()))?;
         self.game_path = folder;
@@ -1204,10 +1261,23 @@ impl GameLauncher {
         let game_path = self.game_path.clone();
         let state_path = self.state_path.clone();
         let disable_auto_start = self.disable_auto_start;
+        let use_managed_client_updates = self.uses_managed_game_path();
         let message_tx = message_tx.clone();
 
         tokio::spawn(async move {
             while let Some(_) = update_rx.recv().await {
+                if !use_managed_client_updates {
+                    info!(
+                        "Cliente local externo selecionado; ignorando update remoto: {:?}",
+                        game_path
+                    );
+                    let _ = message_tx.send(LauncherMessage::SetStatus(
+                        "Cliente local selecionado. Atualizacao remota desativada.".to_string(),
+                    ));
+                    let _ = message_tx.send(LauncherMessage::SetProcessing(false));
+                    continue;
+                }
+
                 // Criar instância do UpdateManager
                 let update_manager = updates::UpdateManager::new(
                     download_path.clone(),
@@ -1243,7 +1313,15 @@ impl GameLauncher {
             .expect("message channel should be initialized")
     }
 
-    fn launch_game(&mut self, _ctx: &egui::Context) -> Result<()> {
+    fn launch_game(&mut self, ctx: &egui::Context) -> Result<()> {
+        if !self.uses_managed_game_path() {
+            info!(
+                "Cliente local selecionado; iniciando sem aplicar feed remoto: {:?}",
+                self.game_path
+            );
+            return self.launch_game_now(ctx);
+        }
+
         info!("Verificando cliente antes de iniciar pelo botao Play Client 15.23...");
         self.status = "Verificando arquivos do cliente...".to_string();
         self.is_processing = true;
@@ -1374,6 +1452,16 @@ impl GameLauncher {
     }
 
     pub fn start_launcher_update(&mut self, ctx: &egui::Context) {
+        if !self.uses_managed_game_path() {
+            self.status = "Cliente local selecionado. Launcher local ja instalado.".to_string();
+            self.is_processing = false;
+            self.progress = 0.0;
+            self.temp_message_time = Some(Instant::now());
+            self.is_alert_message = false;
+            ctx.request_repaint();
+            return;
+        }
+
         let tx = self.ensure_message_sender();
         self.status = "Atualizando launcher...".to_string();
         self.is_processing = true;
@@ -1877,9 +1965,31 @@ impl GameLauncher {
             let needs_repaint = self.needs_repaint.clone();
             let message_sender = self.message_sender.clone();
             let disable_auto_start = self.disable_auto_start; // Capturar o estado do checkbox
+            let use_managed_client_updates = self.uses_managed_game_path();
 
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(6)).await;
+                if !use_managed_client_updates {
+                    info!(
+                        "Cliente local externo selecionado; startup nao aplicara update do launcher ou do cliente"
+                    );
+                    if let Some(sender) = message_sender {
+                        if disable_auto_start {
+                            let _ = sender.send(LauncherMessage::SetStatus(
+                                "Cliente local selecionado. Pronto para jogar.".to_string(),
+                            ));
+                            let _ = sender.send(LauncherMessage::SetProcessing(false));
+                        } else {
+                            let _ = sender.send(LauncherMessage::SetStatus(
+                                "Iniciando o Cliente...".to_string(),
+                            ));
+                            tokio::time::sleep(Duration::from_millis(800)).await;
+                            let _ = sender.send(LauncherMessage::LaunchGame);
+                        }
+                    }
+                    return;
+                }
+
                 info!("Verificando atualizacoes do cliente em segundo plano...");
                 {
                     // Atualizar o status para "Verificando atualizações"
@@ -2338,6 +2448,16 @@ impl GameLauncher {
                                     {
                                         self.show_force_update_modal = false;
 
+                                        if !self.uses_managed_game_path() {
+                                            self.status = "Cliente local selecionado. Force Update nao altera esta pasta.".to_string();
+                                            self.is_processing = false;
+                                            self.progress = 0.0;
+                                            self.temp_message_time = Some(Instant::now());
+                                            self.is_alert_message = true;
+                                            ctx.request_repaint();
+                                            return;
+                                        }
+
                                         // Iniciar a atualização forçada
                                         let tx = self.ensure_message_sender();
                                         self.status = "Iniciando Force Update...".to_string();
@@ -2534,6 +2654,92 @@ impl Drop for GameLauncher {
     }
 }
 
+async fn run_headless_tasks(args: &Args, app_dirs: &AppDirs) -> Result<()> {
+    let cache_manager = cache::CacheManager::new(
+        app_dirs.download_path.clone(),
+        app_dirs.game_path.clone(),
+        app_dirs.state_path.clone(),
+    );
+    let user_settings = cache_manager.load_user_settings().unwrap_or_default();
+    let game_path = normalize_game_root_path(
+        user_settings
+            .game_path
+            .clone()
+            .unwrap_or_else(|| app_dirs.game_path.clone()),
+    );
+
+    fs::create_dir_all(&game_path)
+        .with_context(|| format!("Nao foi possivel criar {}", game_path.display()))?;
+
+    let (sender, mut receiver) = mpsc::unbounded_channel::<LauncherMessage>();
+    let progress_task = tokio::spawn(async move {
+        while let Some(message) = receiver.recv().await {
+            println!("{message:?}");
+        }
+    });
+
+    let managed_client =
+        normalized_path_key(&game_path) == normalized_path_key(&app_dirs.game_path);
+
+    if args.update_client_once {
+        if managed_client {
+            let update_manager = updates::UpdateManager::new(
+                app_dirs.download_path.clone(),
+                game_path.clone(),
+                app_dirs.state_path.clone(),
+            );
+            update_manager
+                .check_for_updates(sender.clone(), true)
+                .await?;
+        } else {
+            ConfigModal::ensure_default_config(&game_path)?;
+            ConfigModal::ensure_stable_mouse_options(&game_path)?;
+            println!(
+                "Selected local client is unmanaged; remote client update skipped for {}",
+                game_path.display()
+            );
+        }
+    }
+
+    if args.full_map_once {
+        let stats = full_map::download_and_install_full_minimap(
+            app_dirs.download_path.clone(),
+            game_path.clone(),
+            sender.clone(),
+        )
+        .await?;
+        println!(
+            "Full map installed into {}: {} files, {} bytes",
+            game_path.display(),
+            stats.files,
+            stats.bytes
+        );
+    }
+
+    if args.prepare_otclient_once {
+        let launcher_path =
+            otclient::ensure_otcrp_launcher(app_dirs.otclient_path.clone(), sender.clone()).await?;
+        println!(
+            "OTClient partner launcher ready: {}",
+            launcher_path.display()
+        );
+    }
+
+    if args.launch_client_once {
+        ConfigModal::ensure_default_config(&game_path)?;
+        ConfigModal::ensure_stable_mouse_options(&game_path)?;
+        let mut game_client = GameClient::new();
+        game_client.set_window_state_path(app_dirs.state_path.join("client-window-state.json"));
+        game_client.launch_main_client(&game_path)?;
+        println!("Launched client from {}", game_path.display());
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+
+    drop(sender);
+    progress_task.abort();
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Analisar argumentos de linha de comando
@@ -2546,6 +2752,23 @@ async fn main() -> Result<()> {
 
     // No início do seu main.rs depois de inicializar o logger
     logger::initialize(args.console);
+
+    // Inicializar os diretorios da aplicacao
+    let app_dirs = AppDirs::init().context("Falha ao inicializar diretórios da aplicação")?;
+
+    info!("Diretorio de download: {:?}", app_dirs.download_path);
+    info!("Diretorio do jogo: {:?}", app_dirs.game_path);
+    info!("Diretorio de estado: {:?}", app_dirs.state_path);
+
+    // Criar diretorios se nao existirem
+    fs::create_dir_all(&app_dirs.download_path).context("Falha ao criar diretório de cache")?;
+    fs::create_dir_all(&app_dirs.game_path).context("Falha ao criar diretório de dados")?;
+    fs::create_dir_all(&app_dirs.state_path).context("Falha ao criar diretório interno")?;
+
+    if args.has_headless_task() {
+        run_headless_tasks(&args, &app_dirs).await?;
+        return Ok(());
+    }
 
     // Inicializar o gerenciador de instância
     let mut instance_manager = InstanceManager::new(INSTANCE_NAME);
@@ -2679,5 +2902,30 @@ impl eframe::App for GameLauncher {
 
         // Chamada para o método de atualização personalizado
         self.custom_update(ctx);
+    }
+}
+
+#[cfg(test)]
+mod launcher_path_tests {
+    use super::normalize_game_root_path;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn normalizes_selected_bin_folder_to_client_root() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("penultima-bin-root-test-{unique}"));
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join("client.exe"), b"test").unwrap();
+
+        let normalized = normalize_game_root_path(bin);
+
+        assert_eq!(fs::canonicalize(&root).unwrap(), normalized);
+
+        let _ = fs::remove_dir_all(root);
     }
 }
