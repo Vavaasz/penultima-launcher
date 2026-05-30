@@ -224,20 +224,24 @@ if (Test-Path $launcherZipPath) {
 
 $portableMetadata = $null
 if (Test-Path $portableZipPath) {
+  $portableHash = (Get-FileHash $portableZipPath -Algorithm SHA256).Hash
+  $portableCacheKey = $portableHash.Substring(0, 12).ToLowerInvariant()
   $portableMetadata = [ordered]@{
-    zip = "downloads/Penultima-Client-Portable.zip"
-    sha256 = (Get-FileHash $portableZipPath -Algorithm SHA256).Hash
+    zip = "downloads/Penultima-Client-Portable.zip?sha256=$portableCacheKey"
+    sha256 = $portableHash
     size = (Get-Item $portableZipPath).Length
   }
 }
 
 $clientFeedMetadata = $null
 if (Test-Path $bootstrapZipPath) {
+  $bootstrapHash = (Get-FileHash $bootstrapZipPath -Algorithm SHA256).Hash
+  $bootstrapCacheKey = $bootstrapHash.Substring(0, 12).ToLowerInvariant()
   $clientFeedMetadata = [ordered]@{
     version = $feedVersion
     root = "downloads/client-feed"
-    bootstrap_zip = "downloads/Penultima-Client-Feed.zip"
-    bootstrap_sha256 = (Get-FileHash $bootstrapZipPath -Algorithm SHA256).Hash
+    bootstrap_zip = "downloads/Penultima-Client-Feed.zip?sha256=$bootstrapCacheKey"
+    bootstrap_sha256 = $bootstrapHash
     bootstrap_size = (Get-Item $bootstrapZipPath).Length
   }
 }
