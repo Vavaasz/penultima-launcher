@@ -1219,6 +1219,17 @@ impl GameLauncher {
     }
 
     fn trigger_force_update(&mut self, ctx: &egui::Context) {
+        if !self.uses_managed_game_path() {
+            self.status =
+                "Cliente local selecionado. Force Update nao altera esta pasta.".to_string();
+            self.is_processing = false;
+            self.progress = 0.0;
+            self.temp_message_time = Some(std::time::Instant::now());
+            self.is_alert_message = true;
+            ctx.request_repaint();
+            return;
+        }
+
         let (has_main, additional_count) = self.game_client.sync_client_state();
         let has_os_client =
             crate::game_client::GameClient::has_client_processes_for_game_path(&self.game_path);

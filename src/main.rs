@@ -81,6 +81,7 @@ struct GameLauncher {
     download_path: PathBuf,
     game_path: PathBuf,
     managed_game_path: PathBuf,
+    selected_game_path: Arc<Mutex<PathBuf>>,
     otclient_path: PathBuf,
     state_path: PathBuf,
     current_version: Option<String>,
@@ -194,6 +195,7 @@ impl Default for GameLauncher {
             download_path: download_path.clone(),
             game_path: game_path.clone(),
             managed_game_path: default_game_path.clone(),
+            selected_game_path: Arc::new(Mutex::new(game_path.clone())),
             otclient_path: app_dirs.otclient_path.clone(),
             state_path: state_path.clone(),
             current_version: None,
@@ -280,6 +282,10 @@ fn normalized_path_key(path: &PathBuf) -> String {
         .to_ascii_lowercase()
 }
 
+fn is_managed_game_path(game_path: &PathBuf, managed_game_path: &PathBuf) -> bool {
+    normalized_path_key(game_path) == normalized_path_key(managed_game_path)
+}
+
 fn normalize_game_root_path(path: PathBuf) -> PathBuf {
     let normalized = without_windows_extended_prefix(&fs::canonicalize(&path).unwrap_or(path));
     let Some(name) = normalized.file_name().and_then(|value| value.to_str()) else {
@@ -350,7 +356,7 @@ impl GameLauncher {
     }
 
     fn uses_managed_game_path(&self) -> bool {
-        normalized_path_key(&self.game_path) == normalized_path_key(&self.managed_game_path)
+        is_managed_game_path(&self.game_path, &self.managed_game_path)
     }
 
     fn select_install_folder(&mut self, ctx: &egui::Context) {
@@ -388,6 +394,9 @@ impl GameLauncher {
         fs::create_dir_all(&folder)
             .with_context(|| format!("Nao foi possivel criar {}", folder.display()))?;
         self.game_path = folder;
+        if let Ok(mut selected_game_path) = self.selected_game_path.lock() {
+            *selected_game_path = self.game_path.clone();
+        }
         self.config_modal = Some(ConfigModal::new(self.game_path.clone()));
         self.load_client_version();
         self.current_version =
@@ -1927,10 +1936,17 @@ impl GameLauncher {
             let needs_repaint = self.needs_repaint.clone();
             let message_sender = self.message_sender.clone();
             let disable_auto_start = self.disable_auto_start; // Capturar o estado do checkbox
-            let use_managed_client_updates = self.uses_managed_game_path();
+            let managed_game_path = self.managed_game_path.clone();
+            let selected_game_path = self.selected_game_path.clone();
 
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(6)).await;
+                let game_path = selected_game_path
+                    .lock()
+                    .map(|path| path.clone())
+                    .unwrap_or_else(|_| game_path.clone());
+                let use_managed_client_updates =
+                    is_managed_game_path(&game_path, &managed_game_path);
                 if !use_managed_client_updates {
                     info!(
                         "Cliente local externo selecionado; startup nao aplicara update do launcher ou do cliente"
@@ -2879,7 +2895,7 @@ impl eframe::App for GameLauncher {
 
 #[cfg(test)]
 mod launcher_path_tests {
-    use super::{normalize_game_root_path, without_windows_extended_prefix};
+    use super::{is_managed_game_path, normalize_game_root_path, without_windows_extended_prefix};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2909,5 +2925,23 @@ mod launcher_path_tests {
     fn normalizes_selected_extended_path_prefix() {
         let normalized = normalize_game_root_path(PathBuf::from(r"\\?\D:\Server\Client"));
         assert_eq!(normalized, PathBuf::from(r"D:\Server\Client"));
+    }
+
+    #[test]
+    fn detects_selected_external_folder_as_unmanaged() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("penultima-managed-path-test-{unique}"));
+        let managed = root.join("managed").join("game");
+        let external = root.join("external").join("game");
+        fs::create_dir_all(&managed).unwrap();
+        fs::create_dir_all(&external).unwrap();
+
+        assert!(is_managed_game_path(&managed, &managed));
+        assert!(!is_managed_game_path(&external, &managed));
+
+        let _ = fs::remove_dir_all(root);
     }
 }
