@@ -68,6 +68,7 @@ The third command rebuilds the launcher release and writes `D:\Server\_publish\P
 
 The fourth command republishes the launcher zip, client feed, and portable client zip directly into `D:\Server\UniServerZ\www\downloads` from your local workstation.
 It also writes `penultima-downloads.json`, which the launcher's `Update Launcher` button uses to find, verify, stage, replace, and restart the launcher executable.
+The launcher metadata points to the tracked `downloads/Penultima-Launcher.zip` with a SHA query string. `Penultima-Launcher-<version>.zip` may exist as an untracked archival copy, but do not point metadata at it unless that file is also explicitly synced to the VPS/public web root.
 When only the client feed is republished, keep the existing `launcher` and `full_minimap` metadata in `penultima-downloads.json` unless those payloads are rebuilt too.
 
 `install-client-feed-hook.ps1` installs a local `post-commit` hook in `D:\Server\Cliente-15.23-Prod` that runs `sounds\publish-website-client-assets.ps1`, so each client commit refreshes the website `client-feed`, bootstrap feed zip, portable client zip, and metadata from the current local client state.

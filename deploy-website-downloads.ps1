@@ -210,7 +210,7 @@ if (Test-Path $launcherZipPath) {
 
   $launcherMetadata = [ordered]@{
     version = $launcherVersion
-    zip = "downloads/${launcherVersionedZipName}?sha256=$launcherZipCacheKey"
+    zip = "downloads/Penultima-Launcher.zip?sha256=$launcherZipCacheKey"
     sha256 = $launcherZipHash
     size = (Get-Item $launcherZipPath).Length
     signed = $launcherSigned
