@@ -8,6 +8,7 @@ use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
+use crate::client_ui_state;
 use crate::client_version::ClientVersionManager;
 use crate::constants::{
     CLIENT_GITHUB_ARCHIVE_URL, CLIENT_GITHUB_RAW_BASE_URL, DOWNLOADS_METADATA_URL,
@@ -268,6 +269,15 @@ impl UpdateManager {
             return Err(anyhow!(message));
         }
 
+        if let Err(error) =
+            client_ui_state::ensure_client_ui_state(&self.state_path, &self.game_path)
+        {
+            info!(
+                "Falha ao preparar estado de UI do cliente antes da atualizacao: {:#}",
+                error
+            );
+        }
+
         let remote = self.fetch_remote_metadata().await?;
         let download_client = reqwest::Client::builder()
             .timeout(HTTP_DOWNLOAD_TIMEOUT)
@@ -344,6 +354,15 @@ impl UpdateManager {
 
         self.persist_metadata(&remote)?;
         self.refresh_versions(&message_sender, &remote.package_version)?;
+
+        if let Err(error) =
+            client_ui_state::restore_client_ui_state(&self.state_path, &self.game_path)
+        {
+            info!(
+                "Falha ao restaurar estado de UI do cliente apos atualizacao: {:#}",
+                error
+            );
+        }
 
         send_message(&message_sender, LauncherMessage::DownloadProgress(1.0))?;
         send_message(

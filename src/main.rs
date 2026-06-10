@@ -19,6 +19,7 @@ mod app_dirs;
 mod boosted_preview;
 mod cache;
 mod cli;
+mod client_ui_state;
 mod client_version;
 mod config_modal;
 mod constants;
@@ -136,6 +137,7 @@ struct GameLauncher {
     tray_manager: Option<TrayManager>,
     restart_for_launcher_update: bool,
     style_configured: bool,
+    had_tracked_clients: bool,
 }
 
 impl Default for GameLauncher {
@@ -250,10 +252,19 @@ impl Default for GameLauncher {
             tray_manager: None,
             restart_for_launcher_update: false,
             style_configured: false,
+            had_tracked_clients: false,
         };
 
         // Carregar versão do client.exe
         launcher.load_client_version();
+
+        if launcher.uses_managed_game_path() {
+            if let Err(error) =
+                client_ui_state::ensure_client_ui_state(&launcher.state_path, &launcher.game_path)
+            {
+                info!("Falha ao preparar estado de UI do cliente: {:#}", error);
+            }
+        }
 
         if let Ok(version) =
             updates::UpdateManager::load_current_version(&launcher.state_path, &launcher.game_path)
@@ -1324,6 +1335,47 @@ impl GameLauncher {
             .expect("message channel should be initialized")
     }
 
+    fn prepare_client_ui_state(&self, phase: &str) {
+        if !self.uses_managed_game_path() {
+            return;
+        }
+
+        match client_ui_state::ensure_client_ui_state(&self.state_path, &self.game_path) {
+            Ok(stats) => info!(
+                "Client UI state prepared {}: {} file(s), {} byte(s)",
+                phase, stats.files, stats.bytes
+            ),
+            Err(error) => info!(
+                "Falha ao preparar estado de UI do cliente {}: {:#}",
+                phase, error
+            ),
+        }
+    }
+
+    fn snapshot_client_ui_state(&self, phase: &str) {
+        if !self.uses_managed_game_path() {
+            return;
+        }
+
+        match client_ui_state::snapshot_client_ui_state(&self.state_path, &self.game_path) {
+            Ok(stats) => info!(
+                "Client UI state snapshotted {}: {} file(s), {} byte(s)",
+                phase, stats.files, stats.bytes
+            ),
+            Err(error) => info!(
+                "Falha ao salvar estado de UI do cliente {}: {:#}",
+                phase, error
+            ),
+        }
+    }
+
+    fn track_client_ui_state_after_poll(&mut self, has_clients: bool) {
+        if self.had_tracked_clients && !has_clients {
+            self.snapshot_client_ui_state("after client exit");
+        }
+        self.had_tracked_clients = has_clients;
+    }
+
     fn launch_game(&mut self, ctx: &egui::Context) -> Result<()> {
         self.launch_game_now(ctx)
     }
@@ -1332,10 +1384,12 @@ impl GameLauncher {
         info!("Tentando iniciar o jogo...");
         self.status = "Iniciando o cliente...".to_string();
         self.is_processing = true;
+        self.prepare_client_ui_state("before main client launch");
 
         // Usar o GameClient para iniciar o jogo principal
         match self.game_client.launch_main_client(&self.game_path) {
             Ok(_) => {
+                self.had_tracked_clients = true;
                 // Atualiza o status
                 self.status = "Cliente em execução".to_string();
 
@@ -1357,9 +1411,11 @@ impl GameLauncher {
     }
 
     fn launch_client(&mut self) -> Result<()> {
+        self.prepare_client_ui_state("before additional client launch");
         // Usar o GameClient para iniciar um cliente adicional
         match self.game_client.launch_additional_client(&self.game_path) {
             Ok(_) => {
+                self.had_tracked_clients = true;
                 // Atualiza o status com o número total de clientes
                 self.status = "Cliente adicional iniciado".to_string();
                 self.status = "Cliente adicional iniciado".to_string();
@@ -1851,7 +1907,9 @@ impl GameLauncher {
             }
 
             // 2. Verificar se o processo principal do jogo terminou (para re-mostrar a janela)
-            if !self.game_client.is_main_client_running()
+            let (hidden_has_main, hidden_additional_count) = self.game_client.sync_client_state();
+            self.track_client_ui_state_after_poll(hidden_has_main || hidden_additional_count > 0);
+            if !hidden_has_main
                 && (self.status.contains("Cliente principal") || self.status.contains("Cliente em"))
             {
                 self.status = "Pronto para jogar".to_string();
@@ -1862,7 +1920,6 @@ impl GameLauncher {
             }
 
             // 3. Limpar clientes adicionais que terminaram
-            self.game_client.update_additional_clients();
             self.sync_clients_tray_state();
 
             // 4. Verificar ping do servidor (async, leve)
@@ -2160,6 +2217,7 @@ impl GameLauncher {
 
         // Atualizar status com base nos clientes ativos e o cliente principal
         let (is_game_running, additional_count) = self.game_client.sync_client_state();
+        self.track_client_ui_state_after_poll(is_game_running || additional_count > 0);
         self.sync_clients_tray_state();
 
         // Não atualizar o status se houver uma mensagem temporária
@@ -2364,7 +2422,7 @@ impl GameLauncher {
 
                         ui.label(
                             egui::RichText::new(
-                                "O clientoptions.json existente sera mantido intacto.",
+                                "As configs de layout existentes serao preservadas.",
                             )
                             .size(13.0)
                             .color(egui::Color32::from_rgb(140, 140, 140)),
@@ -2704,6 +2762,9 @@ async fn run_headless_tasks(args: &Args, app_dirs: &AppDirs) -> Result<()> {
     }
 
     if args.launch_client_once {
+        if managed_client {
+            client_ui_state::ensure_client_ui_state(&app_dirs.state_path, &game_path)?;
+        }
         let mut game_client = GameClient::new();
         game_client.launch_main_client(&game_path)?;
         println!("Launched client from {}", game_path.display());
@@ -2711,6 +2772,9 @@ async fn run_headless_tasks(args: &Args, app_dirs: &AppDirs) -> Result<()> {
     }
 
     if args.launch_client_count > 0 {
+        if managed_client {
+            client_ui_state::ensure_client_ui_state(&app_dirs.state_path, &game_path)?;
+        }
         let mut game_client = GameClient::new();
         game_client.launch_main_client(&game_path)?;
         println!("Launched client 1 from {}", game_path.display());

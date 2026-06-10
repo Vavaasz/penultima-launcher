@@ -9,6 +9,7 @@ What it does:
 - updates the launcher executable from the website-hosted `Penultima-Launcher.zip` on startup, with a manual button as a fallback
 - only updates managed client folders: `assets`, `bin`, and `sounds`
 - keeps launcher state in AppData instead of writing manifests into the client root
+- backs up and restores official 15.23 UI state from `conf\clientoptions.json` and `characterdata\**\*.json`
 - starts the client with production defaults for `ultimaotserv.online`
 - launches only the selected folder's `bin\client.exe`; `client_launcher.exe` and nested client folders are not launch fallbacks
 - keeps update, Force Update, full-map, and config repair work outside the Play button path
@@ -27,6 +28,7 @@ Public client feed:
 - The launcher resolves the preferred runtime client feed from `https://ultimaotserv.online/downloads/penultima-downloads.json` under `client_feed`. The GitHub raw feed is a fallback only.
 - If the direct `D:\Server\Cliente-15.23-Prod\bin\client.exe` works but the launcher-managed AppData client misses protobuf assets, compare `C:\Users\Waldir\AppData\Roaming\Penultima Launcher\game\assets\catalog-content.json` and `state\package.json` against `https://ultimaotserv.online/downloads/client-feed/package.json` before looking at server code.
 - The visible `Play Client 15.23` path must only launch the selected folder's `bin\client.exe`. Client feed repair belongs to `Force Update`, startup/background checks, or explicit headless maintenance, not to the Play click itself.
+- Client layout state is runtime data, not feed data. The launcher must preserve `conf\clientoptions.json` plus all `characterdata\**\*.json` files, including action bars, status bar, sidebars, analyzer widget state, and container widget layout. The managed feed must continue excluding `characterdata`; recovery happens through the launcher's `state\client-ui-state\latest` vault and automatic local discovery, not through manual player import.
 - For the current 15.23 feed, the expected patched `client.exe` SHA-256 is `52449E00EBAE67F433333AC86708E85721C0A762CD2EBF2C6271D2AB8C9DBC98`. The client-editor PR #16 patch changes bytes at offset `0x30D254` from `75 0F E8 35 FF FF FF 48` to `EB 0F E8 35 FF FF FF 48`, but that binary patch does not suppress the visible BattlEye popup when the game server still sends CipSoft's client-check packet.
 - Tibia 15.23 renders `ProtocolGame::sendClientCheck()` (`0x63`, `uint32 1`, `byte 1`) as the `clientcheck_disconnected` BattlEye dialog. If `login.php` already returns `anticheatprotection=false` and the popup still appears after character login, verify that the server login flow is not calling `player->sendClientCheck()` before changing launcher or asset code.
 - The 15.23 client binary contains an `enableClientCheck` config key. Keep `[STARTUP] enableClientCheck=false` in shipped `conf\config.ini` as a client-side guard, but do not rely on it as the only fix; the server should not send the client-check packet for this deployment.
