@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use log::info;
+use serde_json::{Map, Value};
 use std::collections::HashSet;
 use std::env;
 use std::fs;
@@ -8,8 +9,12 @@ use std::time::SystemTime;
 
 const VAULT_DIR: &str = "client-ui-state";
 const LATEST_DIR: &str = "latest";
+const SIDEBAR_TEMPLATE_DIR: &str = "sidebar-layout";
+const SIDEBAR_TEMPLATE_FILE: &str = "sidebars.json";
+const SIDEBAR_TEMPLATE_META_FILE: &str = "meta.json";
 const MAX_DISCOVERY_DEPTH: usize = 2;
 const MAX_CHARACTERDATA_DEPTH: usize = 4;
+const FUTURE_CHARACTERDATA_SLOTS: u32 = 256;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ClientUiStateStats {
@@ -21,6 +26,13 @@ pub struct ClientUiStateStats {
 struct StateFile {
     relative_path: PathBuf,
     length: u64,
+    modified: Option<SystemTime>,
+}
+
+#[derive(Clone, Debug)]
+struct SidebarLayout {
+    value: Value,
+    score: u64,
     modified: Option<SystemTime>,
 }
 
@@ -63,6 +75,7 @@ pub fn ensure_client_ui_state(state_path: &Path, game_path: &Path) -> Result<Cli
     }
 
     if active_stats.files > 0 {
+        sync_sidebar_layout_state(state_path, game_path)?;
         snapshot_client_ui_state(state_path, game_path)?;
     }
 
@@ -78,7 +91,9 @@ pub fn snapshot_client_ui_state(state_path: &Path, game_path: &Path) -> Result<C
     let vault_path = latest_vault_path(state_path);
     fs::create_dir_all(&vault_path)
         .with_context(|| format!("failed to create {}", vault_path.display()))?;
-    copy_state_files(game_path, &vault_path, CopyMode::SnapshotMerge)
+    let copied = copy_state_files(game_path, &vault_path, CopyMode::SnapshotMerge)?;
+    remember_sidebar_layout_template(state_path, game_path)?;
+    Ok(copied)
 }
 
 pub fn restore_client_ui_state(state_path: &Path, game_path: &Path) -> Result<ClientUiStateStats> {
@@ -95,7 +110,9 @@ pub fn restore_client_ui_state(state_path: &Path, game_path: &Path) -> Result<Cl
         CopyMode::RestoreMissingOnly
     };
 
-    copy_state_files(&vault_path, game_path, mode)
+    let copied = copy_state_files(&vault_path, game_path, mode)?;
+    sync_sidebar_layout_state(state_path, game_path)?;
+    Ok(copied)
 }
 
 fn restore_missing_client_ui_state(
@@ -108,6 +125,301 @@ fn restore_missing_client_ui_state(
 
 fn latest_vault_path(state_path: &Path) -> PathBuf {
     state_path.join(VAULT_DIR).join(LATEST_DIR)
+}
+
+fn sidebar_template_path(vault_path: &Path) -> PathBuf {
+    vault_path
+        .join(SIDEBAR_TEMPLATE_DIR)
+        .join(SIDEBAR_TEMPLATE_FILE)
+}
+
+fn sidebar_template_meta_path(vault_path: &Path) -> PathBuf {
+    vault_path
+        .join(SIDEBAR_TEMPLATE_DIR)
+        .join(SIDEBAR_TEMPLATE_META_FILE)
+}
+
+fn sync_sidebar_layout_state(state_path: &Path, game_path: &Path) -> Result<()> {
+    let vault_path = latest_vault_path(state_path);
+    let layout = best_sidebar_layout([
+        load_sidebar_layout_template(&vault_path)?,
+        find_best_sidebar_layout(&vault_path)?,
+        find_best_sidebar_layout(game_path)?,
+    ]);
+
+    if let Some(layout) = layout {
+        save_sidebar_layout_template(&vault_path, &layout.value)?;
+        apply_sidebar_layout_template(state_path, game_path, &layout.value)?;
+    }
+
+    Ok(())
+}
+
+fn remember_sidebar_layout_template(state_path: &Path, game_path: &Path) -> Result<()> {
+    let vault_path = latest_vault_path(state_path);
+    let layout = best_sidebar_layout([
+        load_sidebar_layout_template(&vault_path)?,
+        find_best_sidebar_layout(game_path)?,
+        find_best_sidebar_layout(&vault_path)?,
+    ]);
+
+    if let Some(layout) = layout {
+        save_sidebar_layout_template(&vault_path, &layout.value)?;
+    }
+
+    Ok(())
+}
+
+fn load_sidebar_layout_template(vault_path: &Path) -> Result<Option<SidebarLayout>> {
+    let path = sidebar_template_path(vault_path);
+    read_sidebar_layout(&path)
+}
+
+fn save_sidebar_layout_template(vault_path: &Path, value: &Value) -> Result<()> {
+    let path = sidebar_template_path(vault_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    write_json_pretty(&path, value)
+}
+
+fn find_best_sidebar_layout(root: &Path) -> Result<Option<SidebarLayout>> {
+    let characterdata = root.join("characterdata");
+    if !characterdata.is_dir() {
+        return Ok(None);
+    }
+
+    let mut best = None;
+    for entry in fs::read_dir(&characterdata)
+        .with_context(|| format!("failed to read {}", characterdata.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let candidate = read_sidebar_layout(&path.join("sidebars.json"))?;
+        best = best_sidebar_layout([best, candidate]);
+    }
+
+    Ok(best)
+}
+
+fn read_sidebar_layout(path: &Path) -> Result<Option<SidebarLayout>> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+
+    let body = fs::read_to_string(path)
+        .with_context(|| format!("failed to read sidebar layout {}", path.display()))?;
+    let value: Value = serde_json::from_str(&body)
+        .with_context(|| format!("failed to parse sidebar layout {}", path.display()))?;
+    let score = sidebar_layout_score(&value, body.len() as u64);
+    if score == 0 {
+        return Ok(None);
+    }
+
+    Ok(Some(SidebarLayout {
+        value,
+        score,
+        modified: fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .ok(),
+    }))
+}
+
+fn best_sidebar_layout<I>(layouts: I) -> Option<SidebarLayout>
+where
+    I: IntoIterator<Item = Option<SidebarLayout>>,
+{
+    layouts
+        .into_iter()
+        .flatten()
+        .max_by(|left, right| match left.score.cmp(&right.score) {
+            std::cmp::Ordering::Equal => left.modified.cmp(&right.modified),
+            ordering => ordering,
+        })
+}
+
+fn sidebar_layout_score(value: &Value, byte_len: u64) -> u64 {
+    let container_widgets = count_container_widgets(value) as u64;
+    if container_widgets == 0 {
+        return 0;
+    }
+
+    let container_options = value
+        .get("containersOptions")
+        .and_then(Value::as_object)
+        .map(Map::len)
+        .unwrap_or(0) as u64;
+    let total_widgets = count_sidebar_widgets(value) as u64;
+
+    container_widgets.saturating_mul(1_000_000)
+        + container_options.saturating_mul(10_000)
+        + total_widgets.saturating_mul(100)
+        + byte_len.min(99)
+}
+
+fn count_container_widgets(value: &Value) -> usize {
+    sidebar_widgets(value)
+        .filter(|widget| widget.get("type").and_then(Value::as_str) == Some("container"))
+        .count()
+}
+
+fn count_sidebar_widgets(value: &Value) -> usize {
+    sidebar_widgets(value).count()
+}
+
+fn sidebar_widgets(value: &Value) -> impl Iterator<Item = &Value> {
+    value
+        .get("sidebarWidgetsMangerOptions")
+        .and_then(|manager| manager.get("openWidgetsOrderPerSidebar"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flat_map(|sidebars| sidebars.iter())
+        .filter_map(Value::as_array)
+        .flat_map(|widgets| widgets.iter())
+}
+
+fn apply_sidebar_layout_template(
+    state_path: &Path,
+    game_path: &Path,
+    template: &Value,
+) -> Result<()> {
+    let characterdata = game_path.join("characterdata");
+    fs::create_dir_all(&characterdata)
+        .with_context(|| format!("failed to create {}", characterdata.display()))?;
+
+    let mut ids = collect_numeric_character_ids(&characterdata)?;
+    let Some(current_max) = ids.iter().copied().max() else {
+        return Ok(());
+    };
+
+    let vault_path = latest_vault_path(state_path);
+    let stored_preseed_until = load_sidebar_preseed_until(&vault_path)?;
+    let preseed_until = if current_max > stored_preseed_until {
+        current_max.saturating_add(FUTURE_CHARACTERDATA_SLOTS)
+    } else {
+        stored_preseed_until
+    };
+
+    for id in current_max.saturating_add(1)..=preseed_until {
+        ids.insert(id);
+    }
+
+    for id in ids {
+        let path = characterdata.join(id.to_string()).join("sidebars.json");
+        apply_sidebar_layout_to_file(&path, template)?;
+    }
+
+    save_sidebar_preseed_until(&vault_path, preseed_until)?;
+    Ok(())
+}
+
+fn collect_numeric_character_ids(characterdata: &Path) -> Result<HashSet<u32>> {
+    let mut ids = HashSet::new();
+    for entry in fs::read_dir(characterdata)
+        .with_context(|| format!("failed to read {}", characterdata.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if let Ok(id) = name.parse::<u32>() {
+            ids.insert(id);
+        }
+    }
+
+    Ok(ids)
+}
+
+fn apply_sidebar_layout_to_file(path: &Path, template: &Value) -> Result<bool> {
+    let current = if path.is_file() {
+        let body = fs::read_to_string(path)
+            .with_context(|| format!("failed to read sidebar layout {}", path.display()))?;
+        serde_json::from_str(&body)
+            .with_context(|| format!("failed to parse sidebar layout {}", path.display()))?
+    } else {
+        Value::Object(Map::new())
+    };
+    let merged = merge_sidebar_layout(current.clone(), template);
+
+    if merged == current {
+        return Ok(false);
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    write_json_pretty(path, &merged)?;
+    Ok(true)
+}
+
+fn merge_sidebar_layout(mut current: Value, template: &Value) -> Value {
+    if !current.is_object() {
+        current = Value::Object(Map::new());
+    }
+
+    for key in ["sidebarWidgetsMangerOptions", "containersOptions"] {
+        let Some(template_value) = template.get(key) else {
+            continue;
+        };
+        if let Some(current_object) = current.as_object_mut() {
+            current_object.insert(key.to_string(), template_value.clone());
+        }
+    }
+
+    current
+}
+
+fn load_sidebar_preseed_until(vault_path: &Path) -> Result<u32> {
+    let path = sidebar_template_meta_path(vault_path);
+    if !path.is_file() {
+        return Ok(0);
+    }
+
+    let body = fs::read_to_string(&path).with_context(|| {
+        format!(
+            "failed to read sidebar template metadata {}",
+            path.display()
+        )
+    })?;
+    let value: Value = serde_json::from_str(&body).with_context(|| {
+        format!(
+            "failed to parse sidebar template metadata {}",
+            path.display()
+        )
+    })?;
+
+    Ok(value
+        .get("preseedUntil")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(0))
+}
+
+fn save_sidebar_preseed_until(vault_path: &Path, preseed_until: u32) -> Result<()> {
+    let path = sidebar_template_meta_path(vault_path);
+    let value = serde_json::json!({ "preseedUntil": preseed_until });
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    write_json_pretty(&path, &value)
+}
+
+fn write_json_pretty(path: &Path, value: &Value) -> Result<()> {
+    let body = serde_json::to_string_pretty(value)
+        .with_context(|| format!("failed to serialize {}", path.display()))?;
+    fs::write(path, body).with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn should_restore_vault(
@@ -473,6 +785,10 @@ mod tests {
         );
     }
 
+    fn read_json(root: &Path, relative: &str) -> Value {
+        serde_json::from_str(&fs::read_to_string(root.join(relative)).unwrap()).unwrap()
+    }
+
     #[test]
     fn snapshots_and_restores_layout_state_files() {
         let root = temp_root("snapshot-restore");
@@ -621,5 +937,101 @@ mod tests {
                 .unwrap();
 
         assert_eq!(normalized_path_key(&found), normalized_path_key(&old));
+    }
+
+    #[test]
+    fn sidebar_template_restores_container_position_to_new_runtime_folder() {
+        let root = temp_root("sidebar-template-restore");
+        let game = root.join("game");
+        let state = root.join("state");
+
+        let rich_sidebar = r#"{
+            "containersOptions": {
+                "2": { "contentHeight": 56, "contentMaximized": true },
+                "3": { "contentHeight": 330, "contentMaximized": true },
+                "4": { "contentHeight": 84, "contentMaximized": true }
+            },
+            "sidebarWidgetsMangerOptions": {
+                "leftSidebarCount": 0,
+                "openWidgetsOrderPerSidebar": [
+                    [
+                        { "instance": 0, "type": "battleList" },
+                        { "instance": 3, "type": "container" }
+                    ],
+                    [
+                        { "type": "playerGuide" },
+                        { "type": "questTracker" },
+                        { "instance": 2, "type": "container" },
+                        { "instance": 4, "type": "container" }
+                    ]
+                ]
+            },
+            "skillsWidgetOptions": { "contentHeight": 198, "contentMaximized": true }
+        }"#;
+
+        write_file(&game, "conf/clientoptions.json", r#"{"hotkeyOptions":{}}"#);
+        write_file(&game, "characterdata/100/sidebars.json", rich_sidebar);
+        write_file(
+            &game,
+            "characterdata/101/sidebars.json",
+            r#"{
+                "containersOptions": { "0": { "contentHeight": 47, "contentMaximized": true } },
+                "sidebarWidgetsMangerOptions": {
+                    "leftSidebarCount": 0,
+                    "openWidgetsOrderPerSidebar": [[{ "instance": 0, "type": "battleList" }]]
+                },
+                "skillsWidgetOptions": { "contentHeight": 10, "contentMaximized": false }
+            }"#,
+        );
+
+        snapshot_client_ui_state(&state, &game).unwrap();
+        restore_client_ui_state(&state, &game).unwrap();
+
+        let rich = serde_json::from_str::<Value>(rich_sidebar).unwrap();
+        let restored = read_json(&game, "characterdata/101/sidebars.json");
+        assert_eq!(
+            restored["sidebarWidgetsMangerOptions"],
+            rich["sidebarWidgetsMangerOptions"]
+        );
+        assert_eq!(restored["containersOptions"], rich["containersOptions"]);
+        assert_eq!(
+            restored["skillsWidgetOptions"],
+            serde_json::json!({ "contentHeight": 10, "contentMaximized": false })
+        );
+
+        let future = read_json(&game, "characterdata/357/sidebars.json");
+        assert_eq!(
+            future["sidebarWidgetsMangerOptions"],
+            rich["sidebarWidgetsMangerOptions"]
+        );
+    }
+
+    #[test]
+    fn sidebar_template_preseed_ceiling_does_not_grow_every_run() {
+        let root = temp_root("sidebar-preseed-ceiling");
+        let game = root.join("game");
+        let state = root.join("state");
+        let sidebar = r#"{
+            "containersOptions": { "0": { "contentHeight": 200, "contentMaximized": true } },
+            "sidebarWidgetsMangerOptions": {
+                "leftSidebarCount": 0,
+                "openWidgetsOrderPerSidebar": [[{ "instance": 0, "type": "container" }]]
+            }
+        }"#;
+
+        write_file(&game, "conf/clientoptions.json", r#"{"hotkeyOptions":{}}"#);
+        write_file(&game, "characterdata/200/sidebars.json", sidebar);
+
+        sync_sidebar_layout_state(&state, &game).unwrap();
+        assert!(game.join("characterdata/456/sidebars.json").is_file());
+        assert!(!game.join("characterdata/457/sidebars.json").exists());
+
+        sync_sidebar_layout_state(&state, &game).unwrap();
+        assert!(game.join("characterdata/456/sidebars.json").is_file());
+        assert!(!game.join("characterdata/712/sidebars.json").exists());
+
+        write_file(&game, "characterdata/500/sidebars.json", sidebar);
+        sync_sidebar_layout_state(&state, &game).unwrap();
+        assert!(game.join("characterdata/756/sidebars.json").is_file());
     }
 }
