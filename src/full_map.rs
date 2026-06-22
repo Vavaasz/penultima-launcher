@@ -902,18 +902,11 @@ fn cleanup_stale_full_map_assets(assets_dir: &Path, entries: &[FullMapArchiveEnt
 
 fn cleanup_stale_full_map_minimap(
     minimap_dir: &Path,
-    entries: &[FullMapArchiveEntry],
+    _entries: &[FullMapArchiveEntry],
 ) -> Result<()> {
     if !minimap_dir.exists() {
         return Ok(());
     }
-
-    let archive_minimap_filenames: HashSet<String> = entries
-        .iter()
-        .filter(|entry| entry.root == FullMapInstallRoot::Minimap)
-        .filter_map(|entry| entry.relative_path.file_name())
-        .map(|name| name.to_string_lossy().to_ascii_lowercase())
-        .collect();
 
     for entry in fs::read_dir(minimap_dir)
         .with_context(|| format!("Falha ao listar {}", minimap_dir.display()))?
@@ -932,16 +925,7 @@ fn cleanup_stale_full_map_minimap(
                     format!("Falha ao remover waypoint-cost invalido {}", path.display())
                 })?;
             }
-            continue;
         }
-
-        if !is_client_minimap_color_file(&filename) || archive_minimap_filenames.contains(&filename)
-        {
-            continue;
-        }
-
-        fs::remove_file(&path)
-            .with_context(|| format!("Falha ao remover minimap antigo {}", path.display()))?;
     }
 
     Ok(())
@@ -1347,11 +1331,9 @@ mod tests {
             fs::read(game_path.join("assets").join("custom.txt")).unwrap(),
             b"keep"
         );
-        assert!(
-            !game_path
-                .join("minimap")
-                .join("Minimap_Color_stale.png")
-                .exists()
+        assert_eq!(
+            fs::read(game_path.join("minimap").join("Minimap_Color_stale.png")).unwrap(),
+            b"stale-color"
         );
         assert!(
             !game_path

@@ -13,9 +13,10 @@ for mouse pathing/click movement and writes valid values as the player explores.
 Fake waypoint costs can make mouse movement impossible even when keyboard
 movement still works.
 
-Do not publish generated server Cyclopedia assets through this package. The
-15.23 client treats those assets as startup-critical, and a mismatched catalog,
-map, staticdata, or staticmapdata file can prevent the client from opening.
+Publish the map-related 15.23 asset set with the generated automap tiles. The
+launcher full-map action is expected to refresh both the normal automap cache
+and the custom/Cyclopedia map assets, while leaving sprite/sound/feed assets to
+the regular client feed.
 """
 
 from __future__ import annotations
@@ -516,6 +517,8 @@ def build_package(client_root: Path, world_root: Path, output_path: Path) -> Non
 
     entries: dict[str, bytes | Path] = {}
     add_existing_client_minimap(client_root, entries)
+    add_client_map_assets(client_assets_root, entries)
+    add_world_map_assets(world_root, client_assets_root, entries)
     generated_minimap_files = generate_normal_minimap_entries(source_roots, asset_files, entries)
     write_zip(output_path, entries)
 

@@ -368,16 +368,27 @@ fn merge_sidebar_layout(mut current: Value, template: &Value) -> Value {
         current = Value::Object(Map::new());
     }
 
-    for key in ["sidebarWidgetsMangerOptions", "containersOptions"] {
-        let Some(template_value) = template.get(key) else {
-            continue;
-        };
-        if let Some(current_object) = current.as_object_mut() {
-            current_object.insert(key.to_string(), template_value.clone());
+    let Some(template_object) = template.as_object() else {
+        return current;
+    };
+
+    if current.as_object().is_some_and(Map::is_empty) {
+        return template.clone();
+    }
+
+    if let Some(current_object) = current.as_object_mut() {
+        for (key, template_value) in template_object {
+            if is_sidebar_layout_key(key) {
+                current_object.insert(key.clone(), template_value.clone());
+            }
         }
     }
 
     current
+}
+
+fn is_sidebar_layout_key(key: &str) -> bool {
+    key.ends_with("Options")
 }
 
 fn load_sidebar_preseed_until(vault_path: &Path) -> Result<u32> {
@@ -529,7 +540,7 @@ fn copy_state_files(
         let source = source_root.join(&source_file.relative_path);
         let destination = destination_root.join(&source_file.relative_path);
 
-        if !should_copy_file(&source_file, &destination, mode)? {
+        if !should_copy_file(&source_file, &source, &destination, mode)? {
             continue;
         }
 
@@ -556,7 +567,12 @@ fn copy_state_files(
     Ok(copied)
 }
 
-fn should_copy_file(source_file: &StateFile, destination: &Path, mode: CopyMode) -> Result<bool> {
+fn should_copy_file(
+    source_file: &StateFile,
+    source: &Path,
+    destination: &Path,
+    mode: CopyMode,
+) -> Result<bool> {
     if mode == CopyMode::RestoreOverwriteAll {
         return Ok(true);
     }
@@ -576,7 +592,19 @@ fn should_copy_file(source_file: &StateFile, destination: &Path, mode: CopyMode)
         _ => false,
     };
 
-    Ok(source_is_newer || source_file.length > destination_metadata.len())
+    if source_is_newer || source_file.length > destination_metadata.len() {
+        return Ok(true);
+    }
+
+    files_differ(source, destination)
+}
+
+fn files_differ(left: &Path, right: &Path) -> Result<bool> {
+    let left_bytes =
+        fs::read(left).with_context(|| format!("failed to read {}", left.display()))?;
+    let right_bytes =
+        fs::read(right).with_context(|| format!("failed to read {}", right.display()))?;
+    Ok(left_bytes != right_bytes)
 }
 
 fn discover_best_state_source(state_path: &Path, game_path: &Path) -> Result<Option<PathBuf>> {
@@ -994,16 +1022,37 @@ mod tests {
             rich["sidebarWidgetsMangerOptions"]
         );
         assert_eq!(restored["containersOptions"], rich["containersOptions"]);
-        assert_eq!(
-            restored["skillsWidgetOptions"],
-            serde_json::json!({ "contentHeight": 10, "contentMaximized": false })
-        );
+        assert_eq!(restored["skillsWidgetOptions"], rich["skillsWidgetOptions"]);
 
         let future = read_json(&game, "characterdata/357/sidebars.json");
         assert_eq!(
             future["sidebarWidgetsMangerOptions"],
             rich["sidebarWidgetsMangerOptions"]
         );
+        assert_eq!(future["containersOptions"], rich["containersOptions"]);
+        assert_eq!(future["skillsWidgetOptions"], rich["skillsWidgetOptions"]);
+    }
+
+    #[test]
+    fn snapshot_merge_copies_same_size_sidebar_content_changes() {
+        let root = temp_root("same-size-copy");
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.json");
+        let destination = root.join("destination.json");
+        fs::write(&source, br#"{"contentHeight":250}"#).unwrap();
+        fs::write(&destination, br#"{"contentHeight":300}"#).unwrap();
+
+        let source_file = StateFile {
+            relative_path: PathBuf::from("sidebars.json"),
+            length: fs::metadata(&source).unwrap().len(),
+            modified: None,
+        };
+
+        assert!(
+            should_copy_file(&source_file, &source, &destination, CopyMode::SnapshotMerge).unwrap()
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
