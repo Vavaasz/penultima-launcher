@@ -286,12 +286,13 @@ fn parse_battle_pass(html: &str) -> OfferSummary {
 
 fn parse_pack_week(html: &str) -> OfferSummary {
     let lines = visible_text_lines(html);
-    let offer_scope = offer_scope(html, "packweek-hero", "Vanquisher Package");
+    let offer_scope = offer_scope(html, "packweek-hero", "Specialist Package Contents");
     let facts = wanted_facts(
         &lines,
         &[
-            "Launch price",
-            "Launch window",
+            "Starts",
+            "Fixed price",
+            "Can coexist",
             "Regular price",
             "Bundle value",
         ],
@@ -299,7 +300,7 @@ fn parse_pack_week(html: &str) -> OfferSummary {
 
     OfferSummary {
         title: parse_page_title(html).unwrap_or_else(|| "Package Week".to_string()),
-        subtitle: first_line_containing(&lines, "Frozen Session"),
+        subtitle: first_line_containing(&lines, "Cleave Elementalist"),
         facts,
         previews: parse_offer_previews(&offer_scope, 6),
     }
