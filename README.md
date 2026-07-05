@@ -50,7 +50,7 @@ Public client feed:
 - Local smoke-test flags are available for background maintenance: `--update-client-once`, `--full-map-once`, `--prepare-otclient-once`, and `--launch-client-once`.
 - For a local multi-client smoke test without opening the launcher UI, write `state\settings.json` with the selected local `game_path`, run `penultima-launcher.exe --launch-client-count 3`, and inspect only the PIDs whose executable path is exactly inside that selected client's `bin` folder.
 - To open a visible local launcher beside the production launcher, use an isolated `APPDATA` and pass `--instance-suffix <name>` so the single-instance lock does not signal the production launcher.
-- The OTC button downloads `http://otcrp.com/downloads/penultima/launcher.zip`, extracts `OTCLauncher.exe` under `C:\Users\Waldir\AppData\Roaming\Penultima Launcher\otclient\penultima`, and that stub updates/runs the real OTC install from `C:\Users\Waldir\AppData\Local\otclient-premium\app`.
+- The OTC button downloads `https://www.otcrp.com/downloads/penultima/launcher.zip`, extracts `OTCLauncher.exe` under `C:\Users\Waldir\AppData\Roaming\Penultima Launcher\otclient\penultima`, and that stub updates/runs the real OTC install from `C:\Users\Waldir\AppData\Local\otclient-premium\app`. `https://client.otcrp.com` currently returns HTTP 404, so keep the launcher on the verified `www.otcrp.com` direct ZIP endpoint.
 
 Local publish helpers:
 

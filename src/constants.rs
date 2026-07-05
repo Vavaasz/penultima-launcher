@@ -71,11 +71,11 @@ pub const FULL_MINIMAP_URL_ENV: &str = "PENULTIMA_FULL_MINIMAP_URL";
 pub const OTCRP_PARTNER_SLUG: &str = "penultima";
 
 /// Pagina de download do Partner Launcher OTCRP do Penultima
-pub const OTCRP_LAUNCHER_DOWNLOAD_PAGE_URL: &str = "http://otcrp.com/downloads/penultima";
+pub const OTCRP_LAUNCHER_DOWNLOAD_PAGE_URL: &str = "https://www.otcrp.com/downloads/penultima";
 
 /// ZIP do Partner Launcher OTCRP do Penultima
 pub const OTCRP_PARTNER_LAUNCHER_ZIP_URL: &str =
-    "http://otcrp.com/downloads/penultima/launcher.zip";
+    "https://www.otcrp.com/downloads/penultima/launcher.zip";
 
 /// Manifesto principal do cliente
 pub const CLIENT_PACKAGE_MANIFEST_URL: &str =
